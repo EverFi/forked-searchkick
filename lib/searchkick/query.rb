@@ -556,7 +556,12 @@ module Searchkick
         bool[:should] = should if should.any?        # conversions
 
         # nested query and does not contain match all
-        if nested && !bool.dig(:must, :match_all)
+        if nested
+          if !bool.dig(:must, :dis_max, :queries)
+            bool[:must] = {}
+            bool[:must][:dis_max] = {}
+            bool[:must][:dis_max][:queries] = []
+          end
           bool.dig(:must, :dis_max, :queries) << nested_query(nested, filters)
         end
 
