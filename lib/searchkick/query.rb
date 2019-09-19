@@ -417,7 +417,8 @@ module Searchkick
         # start everything as efficient filters
         # move to post_filters as aggs demand
 
-        filters = where_filters(where)
+        # flatten added here to prevent [[]]
+        filters = where_filters(where).flatten
         post_filters = []
 
         # aggregations
@@ -426,8 +427,10 @@ module Searchkick
         # post filters
         set_post_filters(payload, post_filters) if post_filters.any?
 
-        # first nested where
-        nested = filters.detect{ |f| f.include?(:nested) }
+        # all nested filters
+        nested = filters.collect do |filter|
+          filter if filter.include?(:nested)
+        end.compact
 
         custom_filters = []
         multiply_filters = []
@@ -522,28 +525,25 @@ module Searchkick
       [boost_fields, fields]
     end
 
-    def nested_query(nested, filters)
-      nested = nested.delete(:nested)
-      filters.reject!(&:none?)
+    def nested_query_filter(query:, nested_count:)
+      nested_query = {
+        nested: {
+          path: query.dig(:path),
+          query: {
+            bool: {
+              must: query.dig(:query)
+            }
+          }
+        }
+      }
 
-      # find next nested document and recursively build
-      # query again if one exists
-      additional_nested = filters.detect { |f| f.include?(:nested) }
-      query = additional_nested ? nested_query(additional_nested, filters) : nested[:query]
+      return nested_query if nested_count == 1
 
-      # Handle multiple nested sibling queries which will
-      # be an array here. Insert the array into a
-      # bool: must: array
-      if query.is_a?(Array)
-        query = { bool:
-                  { must: query }
-                }
-      end
-
-      { nested:
-        {
-          path: nested[:path],
-          query: query
+      {
+        "bool": {
+          "filter": [
+            nested_query
+          ]
         }
       }
     end
@@ -555,15 +555,11 @@ module Searchkick
         bool[:must_not] = must_not if must_not.any?  # exclude
         bool[:should] = should if should.any?        # conversions
 
-        # nested query
-        if nested
-          # If query is nested ensure dis_max queries
-          # is available. This allows processing of JSON
-          # field as nested without adding to mappings
-          unless bool.dig(:must, :dis_max, :queries)
-            bool[:must] = { dis_max: { queries: [] } }
+        unless nested.empty?
+          bool[:filter] = nested.map do |query|
+            nested_query_filter(query: query.delete(:nested),
+                                nested_count: nested.count)
           end
-          bool.dig(:must, :dis_max, :queries) << nested_query(nested, filters)
         end
 
         query = {bool: bool}
@@ -884,7 +880,8 @@ module Searchkick
           Array.wrap(value).each { |v| filters << nested_filters(v) }
         elsif value.try(:keys).try(:include?, :nested)
           # Handle nested field containing JSON data
-          Array.wrap(value).each { |v| filters << nested_filters(value[:nested]) }
+          # Array wrapping is happening a level down now
+          value.each { |v| filters << nested_filters(value[:nested]) }
         else
           # expand ranges
           if value.is_a?(Range)
@@ -980,18 +977,24 @@ module Searchkick
       filters
     end
 
-    def nested_filters(value)
-      nested_where = {}
-      value[:where].each do |key, val|
-        key = "#{value[:path]}.#{key}" if key != :nested
-        nested_where.merge!({key => val})
+    def nested_filters(filters)
+      formatted_filters = []
+      filters = filters.is_a?(Array) ? filters : Array.wrap(filters)
+      filters.each do |filter|
+        path = filter.dig(:path)
+        where_conditions = filter.dig(:where).map do |key, value|
+          { "#{path}.#{key}" => value } if key != :nested
+        end
+        formatted_filters.push({
+          nested: {
+            path: path,
+            query: where_conditions.map {
+              |where| where_filters(where)
+            }.flatten
+          }
+        })
       end
-      {
-        nested: {
-          path: value[:path],
-          query: where_filters(nested_where)
-        }
-      }
+      formatted_filters
     end
 
     def term_filters(field, value)

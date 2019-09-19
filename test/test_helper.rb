@@ -1,4 +1,5 @@
 require "bundler/setup"
+require 'byebug'
 Bundler.require(:default)
 require "minitest/autorun"
 require "minitest/pride"
@@ -661,7 +662,7 @@ class Comment
   def search_data
     serializable_hash.except("id", "_id").merge(
       status: status,
-      message: message 
+      message: message
     )
   end
 end
