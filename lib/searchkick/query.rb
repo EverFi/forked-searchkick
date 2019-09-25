@@ -855,6 +855,10 @@ module Searchkick
 
         field = :_id if field.to_s == "id"
 
+        # This addition ensures FE can properly
+        # create dynamic filters!
+        field = field.to_sym
+
         if field == :or
           value.each do |or_clause|
             filters << {bool: {should: or_clause.map { |or_statement| {bool: {filter: where_filters(or_statement)}} }}}

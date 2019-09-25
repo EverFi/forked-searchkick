@@ -44,10 +44,13 @@ class WhereTest < Minitest::Test
     # _or
     assert_search "product", ["Product A", "Product B", "Product C"], where: {_or: [{in_stock: true}, {store_id: 3}]}
     assert_search "product", ["Product A", "Product B", "Product C"], where: {_or: [{orders_count: [2, 4]}, {store_id: [1, 2]}]}
+    assert_search "product", ["Product A", "Product B", "Product C"], where: {'_or' => [{orders_count: [2, 4]}, {store_id: [1, 2]}]}
     assert_search "product", ["Product A", "Product D"], where: {_or: [{orders_count: 1}, {created_at: {gte: now - 1}, backordered: true}]}
+    assert_search "product", ["Product A", "Product D"], where: {'_or' => [{orders_count: 1}, {created_at: {gte: now - 1}, backordered: true}]}
 
     # _and
     assert_search "product", ["Product A"], where: {_and: [{in_stock: true}, {backordered: true}]}
+    assert_search "product", ["Product A"], where: {'_and' => [{in_stock: true}, {backordered: true}]}
 
     # _not
     assert_search "product", ["Product B", "Product C"], where: {_not: {_or: [{orders_count: 1}, {created_at: {gte: now - 1}, backordered: true}]}}

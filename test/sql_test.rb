@@ -157,6 +157,92 @@ class SqlTest < Minitest::Test
     assert_search "frozen", ["Product A"], {fields: ["aisle.name"]}, Speaker
   end
 
+  def test_alternate_boolean_syntax
+    store [
+      {
+        name: 'Walmart', employees: [
+          Employee.create(name: 'Daniel', age: 32),
+          Employee.create(name: 'Kaitlyn', age: 32)
+        ]
+      }
+    ], Store
+
+    result = Store.search('*', {
+      where: {
+        '_and' => [
+          {
+            nested: {
+              path: 'employees',
+              where:  {
+                name: 'Daniel'
+              }
+            }
+          },
+          {
+            nested: {
+              path: 'employees',
+              where: {
+                name: 'Kaitlyn'
+              }
+            }
+          }
+        ]
+      }
+    })
+
+    assert_equal result.results.count, 1
+
+    result = Store.search('*', {
+      where: {
+        '_and' => [
+          {
+            nested: {
+              path: 'employees',
+              where:  {
+                name: 'Daniel'
+              }
+            }
+          },
+          {
+            nested: {
+              path: 'employees',
+              where: {
+                name: 'Charles'
+              }
+            }
+          }
+        ]
+      }
+    })
+
+    assert_equal result.results.count, 0
+
+    result = Store.search('*', {
+      where: {
+        '_or' => [
+          {
+            nested: {
+              path: 'employees',
+              where:  {
+                name: 'Daniel'
+              }
+            }
+          },
+          {
+            nested: {
+              path: 'employees',
+              where: {
+                name: 'Charles'
+              }
+            }
+          }
+        ]
+      }
+    })
+
+    assert_equal result.results.count, 1
+  end
+
   def test_where_multiple_nested
     store [
       {
