@@ -41,7 +41,7 @@ module Searchkick
 
         class << self
           def searchkick_search(term = "*", **options, &block)
-            Searchkick.search(term, {model: self}.merge(options), &block)
+            Searchkick.search(term, model: self, **options, &block)
           end
           alias_method Searchkick.search_method_name, :searchkick_search if Searchkick.search_method_name
 
@@ -86,13 +86,17 @@ module Searchkick
         end
 
         def reindex(method_name = nil, **options)
-          arp = after_reindex_params if respond_to?(:after_reindex_params)
+          params = if respond_to?(:after_reindex_params)
+                     options.merge!(after_reindex_params)
+                   else
+                     { after_reindex_params: nil }
+                   end
 
-          RecordIndexer.new(self).reindex(method_name, after_reindex_params: arp, **options)
+          RecordIndexer.new(self).reindex(method_name, **options.merge(params))
         end unless method_defined?(:reindex)
 
         def similar(options = {})
-          self.class.searchkick_index.similar_record(self, options)
+          self.class.searchkick_index.similar_record(self, **options)
         end unless method_defined?(:similar)
 
         def search_data
