@@ -3,10 +3,10 @@ module Searchkick
     def searchkick(**options)
       options = Searchkick.model_options.merge(options)
 
-      unknown_keywords = options.keys - [:_all, :_type, :batch_size, :callbacks, :case_sensitive, :conversions, :default_fields,
+      unknown_keywords = options.keys - [:_all, :_type, :batch_size, :callbacks, :case_sensitive, :conversions, :deep_paging, :default_fields,
         :filterable, :geo_shape, :highlight, :ignore_above, :index_name, :index_prefix, :inheritance, :language,
-        :locations, :mappings, :match, :merge_mappings, :routing, :searchable, :settings, :similarity,
-        :special_characters, :stem, :stem_conversions, :suggest, :synonyms, :text_end,
+        :locations, :mappings, :match, :merge_mappings, :routing, :searchable, :search_synonyms, :settings, :similarity,
+        :special_characters, :stem, :stemmer, :stem_conversions, :stem_exclusion, :stemmer_override, :suggest, :synonyms, :text_end,
         :text_middle, :text_start, :word, :wordnet, :word_end, :word_middle, :word_start, :thread_safe]
       raise ArgumentError, "unknown keywords: #{unknown_keywords.join(", ")}" if unknown_keywords.any?
 
@@ -19,6 +19,7 @@ module Searchkick
       Searchkick.models << self
 
       options[:_type] ||= -> { searchkick_index.klass_document_type(self, true) }
+      options[:class_name] = model_name.name
 
       callbacks = options.key?(:callbacks) ? options[:callbacks] : :inline
 
@@ -41,12 +42,15 @@ module Searchkick
 
         class << self
           def searchkick_search(term = "*", **options, &block)
+            # TODO throw error in next major version
+            Searchkick.warn("calling search on a relation is deprecated") if Searchkick.relation?(self)
+
             Searchkick.search(term, model: self, **options, &block)
           end
           alias_method Searchkick.search_method_name, :searchkick_search if Searchkick.search_method_name
 
-          def searchkick_index
-            index = class_variable_get(:@@searchkick_index)
+          def searchkick_index(name: nil)
+            index = name || class_variable_get(:@@searchkick_index)
             index = index.call if index.respond_to?(:call)
             index_cache = class_variable_get(:@@searchkick_index_cache)
             index_cache[index] ||= Searchkick::Index.new(index, searchkick_options)
@@ -54,10 +58,11 @@ module Searchkick
           alias_method :search_index, :searchkick_index unless method_defined?(:search_index)
 
           def searchkick_reindex(method_name = nil, **options)
-            scoped = (respond_to?(:current_scope) && respond_to?(:default_scoped) && current_scope && current_scope.to_sql != default_scoped.to_sql) ||
+            # TODO relation = Searchkick.relation?(self)
+            relation = (respond_to?(:current_scope) && respond_to?(:default_scoped) && current_scope && current_scope.to_sql != default_scoped.to_sql) ||
               (respond_to?(:queryable) && queryable != unscoped.with_default_scope)
 
-            searchkick_index.reindex(searchkick_klass, method_name, scoped: scoped, **options)
+            searchkick_index.reindex(searchkick_klass, method_name, scoped: relation, **options)
           end
           alias_method :reindex, :searchkick_reindex unless method_defined?(:reindex)
 
@@ -91,6 +96,7 @@ module Searchkick
           RecordIndexer.new(self).reindex(method_name, after_reindex_params: arp, **options)
         end unless method_defined?(:reindex)
 
+        # TODO switch to keyword arguments
         def similar(options = {})
           self.class.searchkick_index.similar_record(self, **options)
         end unless method_defined?(:similar)

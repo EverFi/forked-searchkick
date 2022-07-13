@@ -2,8 +2,6 @@ require "searchkick/index_options"
 
 module Searchkick
   class Index
-    include IndexOptions
-
     attr_reader :name, :options
 
     def initialize(name, options = {})
@@ -12,12 +10,16 @@ module Searchkick
       @klass_document_type = {} # cache
     end
 
+    def index_options
+      IndexOptions.new(self).index_options
+    end
+
     def create(body = {})
       client.indices.create index: name, body: body
     end
 
     def delete
-      if !Searchkick.server_below?("6.0.0") && alias_exists?
+      if alias_exists?
         # can't call delete directly on aliases in ES 6
         indices = client.indices.get_alias(name: name).keys
         client.indices.delete index: indices
@@ -47,7 +49,7 @@ module Searchkick
     end
 
     def refresh_interval
-      settings.values.first["settings"]["index"]["refresh_interval"]
+      index_settings["refresh_interval"]
     end
 
     def update_settings(settings)
@@ -68,7 +70,7 @@ module Searchkick
           }
         )
 
-      response["hits"]["total"]
+      Searchkick::Results.new(nil, response).total_count
     end
 
     def promote(new_name, update_refresh_interval: false)
@@ -82,7 +84,8 @@ module Searchkick
       old_indices =
         begin
           client.indices.get_alias(name: name).keys
-        rescue Elasticsearch::Transport::Transport::Errors::NotFound
+        rescue => e
+          raise e unless Searchkick.not_found_error?(e)
           {}
         end
       actions = old_indices.map { |old_name| {remove: {index: old_name, alias: name}} } + [{add: {index: new_name, alias: name}}]
@@ -91,18 +94,24 @@ module Searchkick
     alias_method :swap, :promote
 
     def retrieve(record)
-      client.get(
-        index: name,
-        type: document_type(record),
-        id: search_id(record)
-      )["_source"]
+      record_data = RecordData.new(self, record).record_data
+
+      # remove underscore
+      get_options = Hash[record_data.map { |k, v| [k.to_s.sub(/\A_/, "").to_sym, v] }]
+
+      client.get(get_options)["_source"]
     end
 
     def all_indices(unaliased: false)
       indices =
         begin
-          client.indices.get_aliases
-        rescue Elasticsearch::Transport::Transport::Errors::NotFound
+          if client.indices.respond_to?(:get_alias)
+            client.indices.get_alias(index: "#{name}*")
+          else
+            client.indices.get_aliases
+          end
+        rescue => e
+          raise e unless Searchkick.not_found_error?(e)
           {}
         end
       indices = indices.select { |_k, v| v.empty? || v["aliases"].empty? } if unaliased
@@ -154,6 +163,7 @@ module Searchkick
       RecordData.new(self, record).document_type
     end
 
+    # TODO use like: [{_index: ..., _id: ...}] in Searchkick 5
     def similar_record(record, **options)
       like_text = retrieve(record).to_hash
         .keep_if { |k, _| !options[:fields] || options[:fields].map(&:to_s).include?(k) }
@@ -169,6 +179,19 @@ module Searchkick
       Searchkick.search(like_text, model: record.class, **options)
     end
 
+    def reload_synonyms
+      if Searchkick.opensearch?
+        client.transport.perform_request "POST", "_plugins/_refresh_search_analyzers/#{CGI.escape(name)}"
+      else
+        raise Error, "Requires Elasticsearch 7.3+" if Searchkick.server_below?("7.3.0")
+        begin
+          client.transport.perform_request("GET", "#{CGI.escape(name)}/_reload_search_analyzers")
+        rescue Elasticsearch::Transport::Transport::Errors::MethodNotAllowed
+          raise Error, "Requires non-OSS version of Elasticsearch"
+        end
+      end
+    end
+
     # queue
 
     def reindex_queue
@@ -180,13 +203,21 @@ module Searchkick
     def reindex(relation, method_name, scoped:, full: false, scope: nil, **options)
       refresh = options.fetch(:refresh, !scoped)
       true_refresh = options.fetch(:true_refresh, false)
+      options.delete(:refresh)
+      options.delete(:true_refresh)
 
       if method_name
+        # TODO throw ArgumentError
+        Searchkick.warn("unsupported keywords: #{options.keys.map(&:inspect).join(", ")}") if options.any?
+
         # update
         import_scope(relation, method_name: method_name, scope: scope, true_refresh: true_refresh)
         self.refresh if refresh
         true
       elsif scoped && !full
+        # TODO throw ArgumentError
+        Searchkick.warn("unsupported keywords: #{options.keys.map(&:inspect).join(", ")}") if options.any?
+
         # reindex association
         import_scope(relation, scope: scope, true_refresh: true_refresh)
         self.refresh if refresh
@@ -245,6 +276,11 @@ module Searchkick
       end
     end
 
+    # private
+    def uuid
+      index_settings["uuid"]
+    end
+
     protected
 
     def client
@@ -253,6 +289,14 @@ module Searchkick
 
     def bulk_indexer
       @bulk_indexer ||= BulkIndexer.new(self)
+    end
+
+    def index_settings
+      settings.values.first["settings"]["index"]
+    end
+
+    def import_before_promotion(index, relation, **import_options)
+      index.import_scope(relation, **import_options)
     end
 
     # https://gist.github.com/jarosan/3124884
@@ -277,14 +321,16 @@ module Searchkick
         scope: scope
       }
 
+      uuid = index.uuid
+
       # check if alias exists
       alias_exists = alias_exists?
       if alias_exists
-        # import before promotion
-        index.import_scope(relation, **import_options) if import
+        import_before_promotion(index, relation, **import_options) if import
 
         # get existing indices to remove
         unless async
+          check_uuid(uuid, index.uuid)
           promote(index.name, update_refresh_interval: !refresh_interval.nil?)
           clean_indices unless retain
         end
@@ -309,6 +355,7 @@ module Searchkick
           # already promoted if alias didn't exist
           if alias_exists
             puts "Jobs complete. Promoting..."
+            check_uuid(uuid, index.uuid)
             promote(index.name, update_refresh_interval: !refresh_interval.nil?)
           end
           clean_indices unless retain
@@ -320,12 +367,22 @@ module Searchkick
         index.refresh
         true
       end
-    rescue Elasticsearch::Transport::Transport::Errors::BadRequest => e
-      if e.message.include?("No handler for type [text]")
-        raise UnsupportedVersionError, "This version of Searchkick requires Elasticsearch 5 or greater"
+    rescue => e
+      if Searchkick.transport_error?(e) && e.message.include?("No handler for type [text]")
+        raise UnsupportedVersionError, "This version of Searchkick requires Elasticsearch 6 or greater"
       end
 
       raise e
+    end
+
+    # safety check
+    # still a chance for race condition since its called before promotion
+    # ideal is for user to disable automatic index creation
+    # https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-index_.html#index-creation
+    def check_uuid(old_uuid, new_uuid)
+      if old_uuid != new_uuid
+        raise Searchkick::Error, "Safety check failed - only run one Model.reindex per model at a time"
+      end
     end
   end
 end

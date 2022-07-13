@@ -28,10 +28,13 @@ class GeoShapeTest < Minitest::Test
           coordinates: [[[10, 20], [15, 25], [20, 20], [20, 10], [10, 10], [10, 20]]]
         }
       }
-    ], Region
+    ]
   end
 
   def test_circle
+    # https://github.com/elastic/elasticsearch/issues/39237
+    skip unless Searchkick.server_below?("6.6.0")
+
     assert_search "*", ["Region A"], {
       where: {
         territory: {
@@ -42,7 +45,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_envelope
@@ -55,7 +58,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_polygon
@@ -68,7 +71,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_multipolygon
@@ -84,7 +87,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_disjoint
@@ -98,7 +101,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_within
@@ -112,10 +115,10 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
-  def test_search_math
+  def test_search_match
     assert_search "witch", ["Region A"], {
       where: {
         territory: {
@@ -125,7 +128,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_search_no_match
@@ -138,10 +141,13 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_contains
+    # CONTAINS query relation not supported
+    skip unless Searchkick.server_below?("6.6.0")
+
     assert_search "*", ["Region C"], {
       where: {
         territory: {
@@ -152,7 +158,7 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
   def test_latlon
@@ -165,7 +171,10 @@ class GeoShapeTest < Minitest::Test
           }
         }
       }
-    }, Region
+    }
   end
 
+  def default_model
+    Region
+  end
 end
