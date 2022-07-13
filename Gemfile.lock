@@ -1,9 +1,9 @@
 PATH
   remote: .
   specs:
-    searchkick (3.1.1.pre.everfi.2.3.1)
-      activemodel (>= 4.2)
-      elasticsearch (>= 5, < 7)
+    searchkick (4.6.3.pre.everfi.1.0.0)
+      activemodel (>= 5)
+      elasticsearch (>= 6, < 7.14)
       hashie
 
 GEM
@@ -67,8 +67,8 @@ GEM
     faraday-em_synchrony (1.0.0)
     faraday-excon (1.1.0)
     faraday-httpclient (1.0.1)
-    faraday-multipart (1.0.3)
-      multipart-post (>= 1.2, < 3)
+    faraday-multipart (1.0.4)
+      multipart-post (~> 2)
     faraday-net_http (1.0.1)
     faraday-net_http_persistent (1.2.0)
     faraday-patron (1.0.0)
@@ -100,11 +100,16 @@ GEM
       nokogiri (>= 1.5.9)
     minitest (5.14.4)
     multi_json (1.15.0)
-    multipart-post (2.1.1)
+    multipart-post (2.2.3)
     nokogiri (1.12.5-arm64-darwin)
       racc (~> 1.4)
     nokogiri (1.12.5-x86_64-darwin)
       racc (~> 1.4)
+    nokogiri (1.12.5-x86_64-linux)
+      racc (~> 1.4)
+    parallel (1.22.1)
+    parallel_tests (3.11.1)
+      parallel
     racc (1.6.0)
     rack (2.2.3)
     rack-test (1.1.0)
@@ -128,16 +133,18 @@ PLATFORMS
   arm64-darwin-21
   x86_64-darwin-18
   x86_64-darwin-20
+  x86_64-linux
 
 DEPENDENCIES
-  actionpack
-  activejob
-  activerecord
-  bundler
+  actionpack (~> 6.1.0)
+  activejob (~> 6.1.0)
+  activerecord (~> 6.1.0)
   connection_pool
+  elasticsearch (~> 6)
   gemoji-parser
   kaminari
-  minitest
+  minitest (>= 5)
+  parallel_tests
   rake
   redis
   searchkick!
