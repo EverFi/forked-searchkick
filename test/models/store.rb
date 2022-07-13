@@ -1,9 +1,12 @@
 class Store
-  mappings = {
-    properties: {
-      name: {type: "text"}
+  mappings = Searchkick.unified_mappings(
+    :store,
+    {
+      properties: {
+        name: {type: "text"}
+      }
     }
-  }
+  )
 
   searchkick \
     routing: true,

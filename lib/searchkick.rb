@@ -224,7 +224,16 @@ module Searchkick
     if redis
       if redis.respond_to?(:with)
         redis.with do |r|
-          yield r
+          # Needed if you're using redis-namespace
+          #
+          # Without this running certain redis commands
+          # (like info, which we do do in Searchkick::ReindexQueue)
+          # will throw a warning.
+          if r.respond_to?(:redis)
+            yield r.redis
+          else
+            yield r
+          end
         end
       else
         yield redis
@@ -300,15 +309,6 @@ module Searchkick
     end
   end
 
-  def self.unified_mappings(name, mappings)
-    begin
-      return mappings unless Searchkick.server_below?("7.0.0")
-    rescue Faraday::ConnectionFailed # fallback to ES6, might be helpful for non-env tasks like `rake assets:precompile`
-    end
-
-    { name => mappings }
-  end
-
   # private
   # methods are forwarded to base class
   # this check to see if scope exists on that class
@@ -331,6 +331,15 @@ module Searchkick
   def self.transport_error?(e)
     (defined?(Elasticsearch) && e.is_a?(Elasticsearch::Transport::Transport::Error)) ||
     (defined?(OpenSearch) && e.is_a?(OpenSearch::Transport::Transport::Error))
+  end
+
+  def self.unified_mappings(name, mappings)
+    begin
+      return mappings unless Searchkick.server_below?("7.0.0")
+    rescue Faraday::ConnectionFailed # fallback to ES6, might be helpful for non-env tasks like `rake assets:precompile`
+    end
+
+    { name => mappings }
   end
 end
 

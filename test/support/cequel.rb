@@ -51,6 +51,19 @@ class Region
   column :text, :text
 end
 
+class Review
+  include Cequel::Record
+
+  key :id, :timeuuid, auto: true
+  column :name, :text
+
+  def search_data
+    {
+      name: name
+    }
+  end
+end
+
 class Speaker
   include Cequel::Record
 
@@ -92,4 +105,6 @@ class Song
   column :name, :text
 end
 
-[Product, Store, Region, Speaker, Animal, Sku, Song].each(&:synchronize_schema)
+[
+  Product, Store, Region, Review, Speaker, Animal, Sku, Song
+].each(&:synchronize_schema)

@@ -38,6 +38,14 @@ class Region
   field :text, type: Text
 end
 
+class Review
+  include NoBrainer::Document
+
+  field :id,   type: Object
+  field :name, type: String
+  belongs_to :product, validates: false
+end
+
 class Speaker
   include NoBrainer::Document
 
