@@ -1,16 +1,16 @@
 source "https://rubygems.org"
 
-# Specify your gem's dependencies in searchkick.gemspec
 gemspec
 
+gem "rake"
+gem "minitest", ">= 5"
+gem "activerecord", "~> 6.1.0"
+gem "activejob", "~> 6.1.0", require: "active_job"
+gem "actionpack", "~> 6.1.0"
 gem "sqlite3"
-gem "activerecord"
 gem "gemoji-parser"
 gem "typhoeus"
-gem "activejob"
 gem "redis"
 gem "connection_pool"
-
-# kaminari
-gem "actionpack"
 gem "kaminari"
+gem "parallel_tests"

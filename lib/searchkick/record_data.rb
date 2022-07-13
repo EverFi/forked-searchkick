@@ -35,14 +35,12 @@ module Searchkick
       index.klass_document_type(record.class, ignore_type)
     end
 
-    private
-
     def record_data
       data = {
         _index: index.name,
         _id: search_id
       }
-      data[:_type] = document_type if Searchkick.server_below?("7.0.0")
+      data[:_type] = document_type if Searchkick.server_below7?
 
       key_prefix = Searchkick.server_below?("7.0.0") ? '_' : ''
 
@@ -61,6 +59,8 @@ module Searchkick
         indexed_at: Time.now.utc
       )
     end
+
+    private
 
     def search_data(method_name = nil)
       partial_reindex = !method_name.nil?

@@ -1,59 +1,34 @@
 require_relative "test_helper"
 
 class CallbacksTest < Minitest::Test
-  def test_true_create
-    Searchkick.callbacks(true) do
-      store_names ["Product A", "Product B"]
-    end
-    Product.searchkick_index.refresh
-    assert_search "product", ["Product A", "Product B"]
-  end
+  def test_disable_callbacks_model
+    store_names ["product a"]
 
-  def test_false_create
     Searchkick.callbacks(false) do
-      store_names ["Product A", "Product B"]
+      store_names ["product b"]
     end
-    Product.searchkick_index.refresh
-    assert_search "product", []
+    assert_search "product", ["product a"]
+
+    Product.reindex
+
+    assert_search "product", ["product a", "product b"]
   end
 
-  def test_bulk_create
-    Searchkick.callbacks(:bulk) do
-      store_names ["Product A", "Product B"]
-    end
-    Product.searchkick_index.refresh
-    assert_search "product", ["Product A", "Product B"]
-  end
+  def test_disable_callbacks_global
+    # make sure callbacks default to on
+    assert Searchkick.callbacks?
 
-  def test_queue
-    skip unless defined?(ActiveJob) && defined?(Redis)
+    store_names ["product a"]
 
-    reindex_queue = Product.searchkick_index.reindex_queue
-    reindex_queue.clear
+    Searchkick.disable_callbacks
+    assert !Searchkick.callbacks?
 
-    Searchkick.callbacks(:queue) do
-      store_names ["Product A", "Product B"]
-    end
-    Product.searchkick_index.refresh
-    assert_search "product", [], load: false, conversions: false
-    assert_equal 2, reindex_queue.length
+    store_names ["product b"]
+    assert_search "product", ["product a"]
 
-    Searchkick::ProcessQueueJob.perform_later(class_name: "Product")
-    Product.searchkick_index.refresh
-    assert_search "product", ["Product A", "Product B"], load: false
-    assert_equal 0, reindex_queue.length
+    Searchkick.enable_callbacks
+    Product.reindex
 
-    Searchkick.callbacks(:queue) do
-      Product.where(name: "Product B").destroy_all
-      Product.create!(name: "Product C")
-    end
-    Product.searchkick_index.refresh
-    assert_search "product", ["Product A", "Product B"], load: false
-    assert_equal 2, reindex_queue.length
-
-    Searchkick::ProcessQueueJob.perform_later(class_name: "Product")
-    Product.searchkick_index.refresh
-    assert_search "product", ["Product A", "Product C"], load: false
-    assert_equal 0, reindex_queue.length
+    assert_search "product", ["product a", "product b"]
   end
 end

@@ -19,71 +19,24 @@ module Searchkick
       @results ||= with_hit.map(&:first)
     end
 
+    # TODO return enumerator like with_score
     def with_hit
       @with_hit ||= begin
-        if options[:load]
-          # results can have different types
-          results = {}
-
-          hits.group_by { |hit, _| hit["_type"] }.each do |type, grouped_hits|
-            klass = (!options[:index_name] && @klass) || type.camelize.constantize
-            results[type] = results_query(klass, grouped_hits).to_a.index_by { |r| r.id.to_s }
-          end
-
-          missing_ids = []
-
-          # sort
-          results =
-            hits.map do |hit|
-              result = results[hit["_type"]][hit["_id"].to_s]
-              if result && !(options[:load].is_a?(Hash) && options[:load][:dumpable])
-                if (hit["highlight"] || options[:highlight]) && !result.respond_to?(:search_highlights)
-                  highlights = hit_highlights(hit)
-                  result.define_singleton_method(:search_highlights) do
-                    highlights
-                  end
-                end
-              end
-              [result, hit]
-            end.select do |result, hit|
-              missing_ids << hit["_id"] unless result
-              result
-            end
-
-          if missing_ids.any?
-            warn "[searchkick] WARNING: Records in search index do not exist in database: #{missing_ids.join(", ")}"
-          end
-
-          results
-        else
-          hits.map do |hit|
-            result =
-              if hit["_source"]
-                hit.except("_source").merge(hit["_source"])
-              elsif hit["fields"]
-                hit.except("fields").merge(hit["fields"])
-              else
-                hit
-              end
-
-            if hit["highlight"] || options[:highlight]
-              highlight = Hash[hit["highlight"].to_a.map { |k, v| [base_field(k), v.first] }]
-              options[:highlighted_fields].map { |k| base_field(k) }.each do |k|
-                result["highlighted_#{k}"] ||= (highlight[k] || result[k])
-              end
-            end
-
-            result["id"] ||= result["_id"] # needed for legacy reasons
-            [HashWrapper.new(result), hit]
-          end
+        if missing_records.any?
+          Searchkick.warn("Records in search index do not exist in database: #{missing_records.map { |v| v[:id] }.join(", ")}")
         end
+        with_hit_and_missing_records[0]
       end
+    end
+
+    def missing_records
+      @missing_records ||= with_hit_and_missing_records[1]
     end
 
     def suggestions
       if response["suggest"]
         response["suggest"].values.flat_map { |v| v.first["options"] }.sort_by { |o| -o["score"] }.map { |o| o["text"] }.uniq
-      elsif options[:term] == "*"
+      elsif options[:suggest] || options[:term] == "*" # TODO remove 2nd term
         []
       else
         raise "Pass `suggest: true` to the search method for suggestions"
@@ -118,7 +71,11 @@ module Searchkick
     end
 
     def model_name
-      klass.model_name
+      if klass.nil?
+        ActiveModel::Name.new(self.class, nil, 'Result')
+      else
+        klass.model_name
+      end
     end
 
     def entry_name(options = {})
@@ -200,9 +157,18 @@ module Searchkick
       end
     end
 
+    # TODO return enumerator like with_score
     def with_highlights(multiple: false)
       with_hit.map do |result, hit|
         [result, hit_highlights(hit, multiple: multiple)]
+      end
+    end
+
+    def with_score
+      return enum_for(:with_score) unless block_given?
+
+      with_hit.each do |result, hit|
+        yield result, hit["_score"]
       end
     end
 
@@ -210,7 +176,131 @@ module Searchkick
       @options[:misspellings]
     end
 
+    def scroll_id
+      @response["_scroll_id"]
+    end
+
+    def scroll
+      raise Searchkick::Error, "Pass `scroll` option to the search method for scrolling" unless scroll_id
+
+      if block_given?
+        records = self
+        while records.any?
+          yield records
+          records = records.scroll
+        end
+
+        records.clear_scroll
+      else
+        begin
+          # TODO Active Support notifications for this scroll call
+          Searchkick::Results.new(@klass, Searchkick.client.scroll(scroll: options[:scroll], body: {scroll_id: scroll_id}), @options)
+        rescue => e
+          if Searchkick.not_found_error?(e) && e.message =~ /search_context_missing_exception/i
+            raise Searchkick::Error, "Scroll id has expired"
+          else
+            raise e
+          end
+        end
+      end
+    end
+
+    def clear_scroll
+      begin
+        # try to clear scroll
+        # not required as scroll will expire
+        # but there is a cost to open scrolls
+        Searchkick.client.clear_scroll(scroll_id: scroll_id)
+      rescue => e
+        raise e unless Searchkick.transport_error?(e)
+      end
+    end
+
     private
+
+    def with_hit_and_missing_records
+      @with_hit_and_missing_records ||= begin
+        missing_records = []
+
+        if options[:load]
+          grouped_hits = hits.group_by { |hit, _| hit["_index"] }
+
+          # determine models
+          index_models = {}
+          grouped_hits.each do |index, _|
+            models =
+              if @klass
+                [@klass]
+              else
+                index_alias = index.split("_")[0..-2].join("_")
+                Array((options[:index_mapping] || {})[index_alias])
+              end
+            raise Searchkick::Error, "Unknown model for index: #{index}. Pass the `models` option to the search method." unless models.any?
+            index_models[index] = models
+          end
+
+          # fetch results
+          results = {}
+          grouped_hits.each do |index, index_hits|
+            results[index] = {}
+            index_models[index].each do |model|
+              results[index].merge!(results_query(model, index_hits).to_a.index_by { |r| r.id.to_s })
+            end
+          end
+
+          # sort
+          results =
+            hits.map do |hit|
+              result = results[hit["_index"]][hit["_id"].to_s]
+              if result && !(options[:load].is_a?(Hash) && options[:load][:dumpable])
+                if (hit["highlight"] || options[:highlight]) && !result.respond_to?(:search_highlights)
+                  highlights = hit_highlights(hit)
+                  result.define_singleton_method(:search_highlights) do
+                    highlights
+                  end
+                end
+              end
+              [result, hit]
+            end.select do |result, hit|
+              unless result
+                models = index_models[hit["_index"]]
+                missing_records << {
+                  id: hit["_id"],
+                  # may be multiple models for inheritance with child models
+                  # not ideal to return different types
+                  # but this situation shouldn't be common
+                  model: models.size == 1 ? models.first : models
+                }
+              end
+              result
+            end
+        else
+          results =
+            hits.map do |hit|
+              result =
+                if hit["_source"]
+                  hit.except("_source").merge(hit["_source"])
+                elsif hit["fields"]
+                  hit.except("fields").merge(hit["fields"])
+                else
+                  hit
+                end
+
+              if hit["highlight"] || options[:highlight]
+                highlight = Hash[hit["highlight"].to_a.map { |k, v| [base_field(k), v.first] }]
+                options[:highlighted_fields].map { |k| base_field(k) }.each do |k|
+                  result["highlighted_#{k}"] ||= (highlight[k] || result[k])
+                end
+              end
+
+              result["id"] ||= result["_id"] # needed for legacy reasons
+              [HashWrapper.new(result), hit]
+            end
+        end
+
+       [results, missing_records]
+      end
+    end
 
     def results_query(records, hits)
       ids = hits.map { |hit| hit["_id"] }

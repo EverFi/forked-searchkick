@@ -18,13 +18,6 @@ class MatchTest < Minitest::Test
     assert_search "pepperjack cheese skewers", ["Pepper Jack Cheese Skewers"]
   end
 
-  def test_operator
-    store_names ["fresh", "honey"]
-    assert_search "fresh honey", ["fresh", "honey"], {operator: "or"}
-    assert_search "fresh honey", [], {operator: "and"}
-    assert_search "fresh honey", ["fresh", "honey"], {operator: :or}
-  end
-
   # def test_cheese_space_in_query
   #   store_names ["Pepperjack Cheese Skewers"]
   #   assert_search "pepper jack cheese skewers", ["Pepperjack Cheese Skewers"]
@@ -64,6 +57,12 @@ class MatchTest < Minitest::Test
   def test_stemming
     store_names ["Whole Milk", "Fat Free Milk", "Milk"]
     assert_search "milks", ["Milk", "Whole Milk", "Fat Free Milk"]
+    assert_search "milks", ["Milk", "Whole Milk", "Fat Free Milk"], misspellings: false
+  end
+
+  def test_stemming_tokens
+    assert_equal ["milk"], Product.search_index.tokens("milks", analyzer: "searchkick_search")
+    assert_equal ["milk"], Product.search_index.tokens("milks", analyzer: "searchkick_search2")
   end
 
   # fuzzy
@@ -152,12 +151,12 @@ class MatchTest < Minitest::Test
 
   def test_spaces_in_field
     store_names ["Red Bull"]
-    assert_search "redbull", ["Red Bull"]
+    assert_search "redbull", ["Red Bull"], misspellings: false
   end
 
   def test_spaces_in_query
     store_names ["Dishwasher"]
-    assert_search "dish washer", ["Dishwasher"]
+    assert_search "dish washer", ["Dishwasher"], misspellings: false
   end
 
   def test_spaces_three_words
@@ -168,49 +167,6 @@ class MatchTest < Minitest::Test
   def test_spaces_stemming
     store_names ["Almond Milk"]
     assert_search "almondmilks", ["Almond Milk"]
-  end
-
-  # butter
-
-  def test_exclude_butter
-    store_names ["Butter Tub", "Peanut Butter Tub"]
-    assert_search "butter", ["Butter Tub"], exclude: ["peanut butter"]
-  end
-
-  def test_exclude_butter_word_start
-    store_names ["Butter Tub", "Peanut Butter Tub"]
-    assert_search "butter", ["Butter Tub"], exclude: ["peanut butter"], match: :word_start
-  end
-
-  def test_exclude_butter_exact
-    store_names ["Butter Tub", "Peanut Butter Tub"]
-    assert_search "butter", [], exclude: ["peanut butter"], fields: [{name: :exact}]
-  end
-
-  def test_exclude_same_exact
-    store_names ["Butter Tub", "Peanut Butter Tub"]
-    assert_search "Butter Tub", ["Butter Tub"], exclude: ["Peanut Butter Tub"], fields: [{name: :exact}]
-  end
-
-  def test_exclude_egg_word_start
-    store_names ["eggs", "eggplant"]
-    assert_search "egg", ["eggs"], exclude: ["eggplant"], match: :word_start
-  end
-
-  def test_exclude_string
-    store_names ["Butter Tub", "Peanut Butter Tub"]
-    assert_search "butter", ["Butter Tub"], exclude: "peanut butter"
-  end
-
-  def test_exclude_match_all
-    store_names ["Butter"]
-    assert_search "*", [], exclude: "butter"
-  end
-
-  def test_exclude_match_all_fields
-    store_names ["Butter"]
-    assert_search "*", [], fields: [:name], exclude: "butter"
-    assert_search "*", ["Butter"], fields: [:color], exclude: "butter"
   end
 
   # other
@@ -291,14 +247,62 @@ class MatchTest < Minitest::Test
   end
 
   def test_emoji
-    skip unless defined?(EmojiParser)
     store_names ["Banana"]
     assert_search "🍌", ["Banana"], emoji: true
   end
 
   def test_emoji_multiple
-    skip unless defined?(EmojiParser)
     store_names ["Ice Cream Cake"]
     assert_search "🍨🍰", ["Ice Cream Cake"], emoji: true
+    assert_search "🍨🍰", ["Ice Cream Cake"], emoji: true, misspellings: false
+  end
+
+  # operator
+
+  def test_operator
+    store_names ["fresh", "honey"]
+    assert_search "fresh honey", ["fresh", "honey"], {operator: "or"}
+    assert_search "fresh honey", [], {operator: "and"}
+    assert_search "fresh honey", ["fresh", "honey"], {operator: :or}
+  end
+
+  def test_operator_scoring
+    store_names ["Big Red Circle", "Big Green Circle", "Small Orange Circle"]
+    assert_order "big red circle", ["Big Red Circle", "Big Green Circle", "Small Orange Circle"], operator: "or"
+  end
+
+  # fields
+
+  def test_fields_operator
+    store [
+      {name: "red", color: "red"},
+      {name: "blue", color: "blue"},
+      {name: "cyan", color: "blue green"},
+      {name: "magenta", color: "red blue"},
+      {name: "green", color: "green"}
+    ]
+    assert_search "red blue", ["red", "blue", "cyan", "magenta"], operator: "or", fields: ["color"]
+  end
+
+  def test_fields
+    store [
+      {name: "red", color: "light blue"},
+      {name: "blue", color: "red fish"}
+    ]
+    assert_search "blue", ["red"], fields: ["color"]
+  end
+
+  def test_non_existent_field
+    store_names ["Milk"]
+    assert_search "milk", [], fields: ["not_here"]
+  end
+
+  def test_fields_both_match
+    # have same score due to dismax
+    store [
+      {name: "Blue A", color: "red"},
+      {name: "Blue B", color: "light blue"}
+    ]
+    assert_first "blue", "Blue B", fields: [:name, :color]
   end
 end

@@ -1,5 +1,6 @@
 module Searchkick
   class Query
+    include Enumerable
     extend Forwardable
 
     @@metric_aggs = [:avg, :cardinality, :max, :min, :sum]
@@ -12,21 +13,21 @@ module Searchkick
       :took, :error, :model_name, :entry_name, :total_count, :total_entries,
       :current_page, :per_page, :limit_value, :padding, :total_pages, :num_pages,
       :offset_value, :offset, :previous_page, :prev_page, :next_page, :first_page?, :last_page?,
-      :out_of_range?, :hits, :response, :to_a, :first
+      :out_of_range?, :hits, :response, :to_a, :first, :scroll, :highlights, :with_highlights,
+      :with_score, :misspellings?, :scroll_id, :clear_scroll, :missing_records, :with_hit
 
     def initialize(klass, term = "*", **options)
-      unknown_keywords = options.keys - [:aggs, :body, :body_options, :boost,
+      unknown_keywords = options.keys - [:aggs, :block, :body, :body_options, :boost,
         :boost_by, :boost_by_distance, :boost_by_recency, :boost_where, :conversions, :conversions_term, :debug, :emoji, :exclude, :execute, :explain,
         :fields, :highlight, :includes, :index_name, :indices_boost, :limit, :load,
-        :match, :misspellings, :model_includes, :offset, :operator, :order, :padding, :page, :per_page, :profile,
-        :request_params, :routing, :scope_results, :select, :similar, :smart_aggs, :suggest, :total_entries, :track,
-        :type, :where, :nested]
+        :match, :misspellings, :models, :model_includes, :offset, :operator, :order, :padding, :page, :per_page, :profile,
+        :request_params, :routing, :scope_results, :scroll, :select, :similar, :smart_aggs, :suggest, :total_entries, :track, :type, :where, :nested]
       raise ArgumentError, "unknown keywords: #{unknown_keywords.join(", ")}" if unknown_keywords.any?
 
       term = term.to_s
 
       if options[:emoji]
-        term = EmojiParser.parse_unicode(term) { |e| " #{e.name} " }.strip
+        term = EmojiParser.parse_unicode(term) { |e| " #{e.name.tr('_', ' ')} " }.strip
       end
 
       @klass = klass
@@ -40,6 +41,7 @@ module Searchkick
       @misspellings = false
       @misspellings_below = nil
       @highlighted_fields = nil
+      @index_mapping = nil
 
       prepare
     end
@@ -57,13 +59,24 @@ module Searchkick
     end
 
     def params
+      if options[:models]
+        @index_mapping = {}
+        Array(options[:models]).each do |model|
+          # there can be multiple models per index name due to inheritance - see #1259
+          (@index_mapping[model.searchkick_index.name] ||= []) << model
+        end
+      end
+
       index =
         if options[:index_name]
           Array(options[:index_name]).map { |v| v.respond_to?(:searchkick_index) ? v.searchkick_index.name : v }.join(",")
+        elsif options[:models]
+          @index_mapping.keys.join(",")
         elsif searchkick_index
           searchkick_index.name
         else
-          "_all"
+          # fixes warning about accessing system indices
+          "*,-.*"
         end
 
       params = {
@@ -72,6 +85,7 @@ module Searchkick
       }
       params[:type] = @type if @type
       params[:routing] = @routing if @routing
+      params[:scroll] = @scroll if @scroll
       params.merge!(options[:request_params]) if options[:request_params]
       params
     end
@@ -95,11 +109,21 @@ module Searchkick
       query = params
       type = query[:type]
       index = query[:index].is_a?(Array) ? query[:index].join(",") : query[:index]
+      request_params = query.except(:index, :type, :body)
 
       # no easy way to tell which host the client will use
-      host = Searchkick.client.transport.hosts.first
+      host =
+        if Searchkick.client.transport.respond_to?(:transport)
+          Searchkick.client.transport.transport.hosts.first
+        else
+          Searchkick.client.transport.hosts.first
+        end
       credentials = host[:user] || host[:password] ? "#{host[:user]}:#{host[:password]}@" : nil
-      "curl #{host[:protocol]}://#{credentials}#{host[:host]}:#{host[:port]}/#{CGI.escape(index)}#{type ? "/#{type.map { |t| CGI.escape(t) }.join(',')}" : ''}/_search?pretty -H 'Content-Type: application/json' -d '#{query[:body].to_json}'"
+      params = ["pretty"]
+      request_params.each do |k, v|
+        params << "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"
+      end
+      "curl #{host[:protocol]}://#{credentials}#{host[:host]}:#{host[:port]}/#{CGI.escape(index)}#{type ? "/#{type.map { |t| CGI.escape(t) }.join(',')}" : ''}/_search?#{params.join('&')} -H 'Content-Type: application/json' -d '#{query[:body].to_json}'"
     end
 
     def handle_response(response)
@@ -117,12 +141,15 @@ module Searchkick
         misspellings: @misspellings,
         term: term,
         scope_results: options[:scope_results],
-        index_name: options[:index_name],
         total_entries: options[:total_entries],
+        index_mapping: @index_mapping,
+        suggest: options[:suggest],
+        scroll: options[:scroll],
         nested: options[:nested]
       }
 
       if options[:debug]
+        # can remove when minimum Ruby version is 2.5
         require "pp"
 
         puts "Searchkick Version: #{Searchkick::VERSION}"
@@ -217,9 +244,12 @@ module Searchkick
 
       # pagination
       page = [options[:page].to_i, 1].max
-      per_page = (options[:limit] || options[:per_page] || 10_000).to_i
+      # maybe use index.max_result_window in the future
+      default_limit = searchkick_options[:deep_paging] ? 1_000_000_000 : 10_000
+      per_page = (options[:limit] || options[:per_page] || default_limit).to_i
       padding = [options[:padding].to_i, 0].max
       offset = options[:offset] || (page - 1) * per_page + padding
+      scroll = options[:scroll]
 
       # model and eager loading
       load = options[:load].nil? ? true : options[:load]
@@ -283,10 +313,10 @@ module Searchkick
             prefix_length = (misspellings.is_a?(Hash) && misspellings[:prefix_length]) || 0
             default_max_expansions = @misspellings_below ? 20 : 3
             max_expansions = (misspellings.is_a?(Hash) && misspellings[:max_expansions]) || default_max_expansions
-            misspellings_fields = misspellings.is_a?(Hash) && misspellings.key?(:fields) && misspellings[:fields].map { |f| "#{f}.#{@match_suffix}" }
+            misspellings_fields = misspellings.is_a?(Hash) && misspellings.key?(:fields) && misspellings[:fields].map(&:to_s)
 
             if misspellings_fields
-              missing_fields = misspellings_fields - fields
+              missing_fields = misspellings_fields - fields.map { |f| base_field(f) }
               if missing_fields.any?
                 raise ArgumentError, "All fields in per-field misspellings must also be specified in fields option"
               end
@@ -326,14 +356,14 @@ module Searchkick
             exclude_analyzer = nil
             exclude_field = field
 
-            field_misspellings = misspellings && (!misspellings_fields || misspellings_fields.include?(field))
+            field_misspellings = misspellings && (!misspellings_fields || misspellings_fields.include?(base_field(field)))
 
             if field == "_all" || field.end_with?(".analyzed")
-              shared_options[:cutoff_frequency] = 0.001 unless operator.to_s == "and" || field_misspellings == false
+              shared_options[:cutoff_frequency] = 0.001 unless operator.to_s == "and" || field_misspellings == false || (!below73? && !track_total_hits?)
               qs << shared_options.merge(analyzer: "searchkick_search")
 
-              # searchkick_search and searchkick_search2 are the same for ukrainian
-              unless %w(japanese korean polish ukrainian vietnamese).include?(searchkick_options[:language])
+              # searchkick_search and searchkick_search2 are the same for some languages
+              unless %w(japanese japanese2 korean polish ukrainian vietnamese).include?(searchkick_options[:language])
                 qs << shared_options.merge(analyzer: "searchkick_search2")
               end
               exclude_analyzer = "searchkick_search2"
@@ -379,7 +409,7 @@ module Searchkick
               queries_to_add.concat(q2)
             end
 
-            queries.concat(queries_to_add)
+            queries << queries_to_add
 
             if options[:exclude]
               must_not.concat(set_exclude(exclude_field, exclude_analyzer))
@@ -394,9 +424,10 @@ module Searchkick
 
             should = []
           else
+            # higher score for matching more fields
             payload = {
-              dis_max: {
-                queries: queries
+              bool: {
+                should: queries.map { |qs| {dis_max: {queries: qs}} }
               }
             }
 
@@ -412,6 +443,24 @@ module Searchkick
         where = (options[:where] || {}).dup
         if searchkick_options[:inheritance] && (options[:type] || (klass != searchkick_klass && searchkick_index))
           where[:type] = [options[:type] || klass].flatten.map { |v| searchkick_index.klass_document_type(v, true) }
+        end
+
+        models = Array(options[:models])
+        if models.any? { |m| m != m.searchkick_klass }
+          # aliases are not supported with _index in ES below 7.5
+          # see https://github.com/elastic/elasticsearch/pull/46640
+          if below75?
+            Searchkick.warn("Passing child models to models option throws off hits and pagination - use type option instead")
+          else
+            index_type_or =
+              models.map do |m|
+                v = {_index: m.searchkick_index.name}
+                v[:type] = m.searchkick_index.klass_document_type(m, true) if m != m.searchkick_klass
+                v
+              end
+
+            where[:or] = Array(where[:or]) + [index_type_or]
+          end
         end
 
         # start everything as efficient filters
@@ -472,7 +521,7 @@ module Searchkick
       pagination_options = options[:page] || options[:limit] || options[:per_page] || options[:offset] || options[:padding]
       if !options[:body] || pagination_options
         payload[:size] = per_page
-        payload[:from] = offset
+        payload[:from] = offset if offset > 0
       end
 
       # type
@@ -483,14 +532,28 @@ module Searchkick
       # routing
       @routing = options[:routing] if options[:routing]
 
+      if track_total_hits?
+        payload[:track_total_hits] = true
+      end
+
       # merge more body options
       payload = payload.deep_merge(options[:body_options]) if options[:body_options]
+
+      # run block
+      options[:block].call(payload) if options[:block]
+
+      # scroll optimization when interating over all docs
+      # https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html
+      if options[:scroll] && payload[:query] == {match_all: {}}
+        payload[:sort] ||= ["_doc"]
+      end
 
       @body = payload
       @page = page
       @per_page = per_page
       @padding = padding
       @load = load
+      @scroll = scroll
     end
 
     def set_fields
@@ -547,7 +610,8 @@ module Searchkick
 
     def build_query(query, filters, should, must_not, custom_filters, multiply_filters)
       if filters.any? || must_not.any? || should.any?
-        bool = {must: query}
+        bool = {}
+        bool[:must] = query if query
         bool[:filter] = filters if filters.any?      # where
         bool[:must_not] = must_not if must_not.any?  # exclude
         bool[:should] = should if should.any?        # conversions
@@ -689,11 +753,9 @@ module Searchkick
     def set_boost_by_indices(payload)
       return unless options[:indices_boost]
 
-      indices_boost = options[:indices_boost].each_with_object({}) do |(key, boost), memo|
+      indices_boost = options[:indices_boost].map do |key, boost|
         index = key.respond_to?(:searchkick_index) ? key.searchkick_index.name : key
-        # try to use index explicitly instead of alias: https://github.com/elasticsearch/elasticsearch/issues/4756
-        index_by_alias = Searchkick.client.indices.get_alias(index: index).keys.first
-        memo[index_by_alias || index] = boost
+        {index => boost}
       end
 
       payload[:indices_boost] = indices_boost
@@ -730,7 +792,7 @@ module Searchkick
     def set_highlights(payload, fields)
       payload[:highlight] = {
         fields: Hash[fields.map { |f| [f, {}] }],
-        fragment_size: below60? ? 30000 : 0
+        fragment_size: 0
       }
 
       if options[:highlight].is_a?(Hash)
@@ -838,14 +900,20 @@ module Searchkick
       }
     end
 
-    # TODO id transformation for arrays
     def set_order(payload)
       order = options[:order].is_a?(Enumerable) ? options[:order] : {options[:order] => :asc}
-      id_field = :_uid
+      id_field = :_id
+      # TODO no longer map id to _id in Searchkick 5
+      # since sorting on _id is deprecated in Elasticsearch
       payload[:sort] = order.is_a?(Array) ? order : Hash[order.map { |k, v| [k.to_s == "id" ? id_field : k, v] }]
     end
 
     def where_filters(where)
+      # if where.respond_to?(:permitted?) && !where.permitted?
+      #   # TODO check in more places
+      #   Searchkick.warn("Passing unpermitted parameters will raise an exception in Searchkick 5")
+      # end
+
       filters = []
       (where || {}).each do |field, value|
 
@@ -870,10 +938,12 @@ module Searchkick
         elsif value.try(:keys).try(:include?, :nested)
           # Handle nested field containing JSON data
           Array.wrap(value).each { |v| filters << nested_filters(value[:nested]) }
+        # elsif field == :_script
+        #   filters << {script: {script: {source: value, lang: "painless"}}}
         else
           # expand ranges
           if value.is_a?(Range)
-            value = {gte: value.first, (value.exclude_end? ? :lt : :lte) => value.last}
+            value = expand_range(value)
           end
 
           value = {in: value} if value.is_a?(Array)
@@ -925,6 +995,32 @@ module Searchkick
                     }
                   }
                 }
+              when :like, :ilike
+                # based on Postgres
+                # https://www.postgresql.org/docs/current/functions-matching.html
+                # % matches zero or more characters
+                # _ matches one character
+                # \ is escape character
+                # escape Lucene reserved characters
+                # https://www.elastic.co/guide/en/elasticsearch/reference/current/regexp-syntax.html#regexp-optional-operators
+                reserved = %w(\\ . ? + * | { } [ ] ( ) ")
+                regex = op_value.dup
+                reserved.each do |v|
+                  regex.gsub!(v, "\\\\" + v)
+                end
+                regex = regex.gsub(/(?<!\\)%/, ".*").gsub(/(?<!\\)_/, ".").gsub("\\%", "%").gsub("\\_", "_")
+
+                if op == :ilike
+                  if below710?
+                    raise ArgumentError, "ilike requires Elasticsearch 7.10+"
+                  else
+                    filters << {regexp: {field => {value: regex, flags: "NONE", case_insensitive: true}}}
+                  end
+                else
+                  filters << {regexp: {field => {value: regex, flags: "NONE"}}}
+                end
+              when :prefix
+                filters << {prefix: {field => {value: op_value}}}
               when :regexp # support for regexp queries without using a regexp ruby object
                 filters << {regexp: {field => {value: op_value}}}
               when :not, :_not # not equal
@@ -935,6 +1031,8 @@ module Searchkick
                 end
               when :in
                 filters << term_filters(field, op_value)
+              when :exists
+                filters << {exists: {field: field}}
               else
                 range_query =
                   case op
@@ -994,9 +1092,46 @@ module Searchkick
       elsif value.nil?
         {bool: {must_not: {exists: {field: field}}}}
       elsif value.is_a?(Regexp)
-        {regexp: {field => {value: value.source, flags: "NONE"}}}
+        source = value.source
+        unless source.start_with?("\\A") && source.end_with?("\\z")
+          # https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-regexp-query.html
+          Searchkick.warn("Regular expressions are always anchored in Elasticsearch")
+        end
+
+        # TODO handle other anchor characters, like ^, $, \Z
+        if source.start_with?("\\A")
+          source = source[2..-1]
+        else
+          # TODO uncomment in Searchkick 5
+          # source = ".*#{source}"
+        end
+
+        if source.end_with?("\\z")
+          source = source[0..-3]
+        else
+          # TODO uncomment in Searchkick 5
+          # source = "#{source}.*"
+        end
+
+        if below710?
+          if value.casefold?
+            Searchkick.warn("Case-insensitive flag does not work with Elasticsearch < 7.10")
+          end
+          {regexp: {field => {value: source, flags: "NONE"}}}
+        else
+          {regexp: {field => {value: source, flags: "NONE", case_insensitive: value.casefold?}}}
+        end
       else
-        {term: {field => value}}
+        # TODO add this for other values
+        if value.as_json.is_a?(Enumerable)
+          # query will fail, but this is better
+          # same message as Active Record
+          # TODO make TypeError
+          # raise InvalidQueryError for backward compatibility
+          raise Searchkick::InvalidQueryError, "can't cast #{value.class.name}"
+        end
+
+        {term: {field => {value: value}}}
       end
     end
 
@@ -1056,12 +1191,47 @@ module Searchkick
       end
     end
 
-    def below60?
-      Searchkick.server_below?("6.0.0")
+    def expand_range(range)
+      expanded = {}
+      expanded[:gte] = range.begin if range.begin
+
+      if range.end && !(range.end.respond_to?(:infinite?) && range.end.infinite?)
+        expanded[range.exclude_end? ? :lt : :lte] = range.end
+      end
+
+      expanded
+    end
+
+    def base_field(k)
+      k.sub(/\.(analyzed|word_start|word_middle|word_end|text_start|text_middle|text_end|exact)\z/, "")
+    end
+
+    def track_total_hits?
+      (searchkick_options[:deep_paging] && !below70?) || body_options[:track_total_hits]
+    end
+
+    def body_options
+      options[:body_options] || {}
     end
 
     def below61?
       Searchkick.server_below?("6.1.0")
+    end
+
+    def below70?
+      Searchkick.server_below?("7.0.0")
+    end
+
+    def below73?
+      Searchkick.server_below?("7.3.0")
+    end
+
+    def below75?
+      Searchkick.server_below?("7.5.0")
+    end
+
+    def below710?
+      Searchkick.server_below?("7.10.0")
     end
   end
 end
