@@ -37,6 +37,13 @@ class Region
   field :text
 end
 
+class Review
+  include Mongoid::Document
+  belongs_to :product
+
+  field :name
+end
+
 class Speaker
   include Mongoid::Document
 

@@ -919,6 +919,7 @@ module Searchkick
 
         # Ensure nested JSON field keys are symbols
         # and not strings for processing below
+        # NOTE: This is not present in upstream as of version 4.6.3
         value.try(:deep_symbolize_keys!)
 
         field = :_id if field.to_s == "id"

@@ -65,6 +65,7 @@ Product.reindex
 Product.reindex # run twice for both index paths
 Product.create!(name: "Set mapping")
 
+AltStore.reindex
 Store.reindex
 Animal.reindex
 Speaker.reindex
@@ -77,6 +78,7 @@ TimeCard.reindex
 class Minitest::Test
   def setup
     Product.destroy_all
+    AltStore.destroy_all
     Store.destroy_all
     Animal.destroy_all
     Speaker.destroy_all

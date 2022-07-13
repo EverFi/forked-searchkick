@@ -300,14 +300,14 @@ module Searchkick
     end
   end
 
-  def self.unified_mappings(name, mappings)
-    begin
-      return mappings unless Searchkick.server_below?("7.0.0")
-    rescue Faraday::ConnectionFailed # fallback to ES6, might be helpful for non-env tasks like `rake assets:precompile`
-    end
+  #def self.unified_mappings(name, mappings)
+  #  begin
+  #    return mappings unless Searchkick.server_below?("7.0.0")
+  #  rescue Faraday::ConnectionFailed # fallback to ES6, might be helpful for non-env tasks like `rake assets:precompile`
+  #  end
 
-    { name => mappings }
-  end
+  #  { name => mappings }
+  #end
 
   # private
   # methods are forwarded to base class

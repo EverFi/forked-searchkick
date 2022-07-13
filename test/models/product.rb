@@ -44,4 +44,8 @@ class Product
       name: name
     }
   end
+
+  def search_routing
+    name
+  end
 end

@@ -4,14 +4,11 @@ class ErrorsTest < Minitest::Test
   def test_bulk_import_raises_error
     valid_dog = Product.create(name: "2016-01-02")
     invalid_dog = Product.create(name: "Ol' One-Leg")
-    index = Searchkick::Index.new "dogs", mappings: Searchkick.unified_mappings(
-      :dog,
-      {
-        properties: {
-          name: {type: "date"}
-        }
+    index = Searchkick::Index.new "dogs", mappings: {
+      properties: {
+        name: {type: "date"}
       }
-    )
+    }
     index.store valid_dog
     assert_raises(Searchkick::ImportError) do
       index.bulk_index [valid_dog, invalid_dog]
