@@ -1,8 +1,10 @@
-require "active_model"
+# dependencies
+require "active_support"
 require "active_support/core_ext/hash/deep_merge"
 require "elasticsearch"
 require "hashie"
 
+# modules
 require "searchkick/bulk_indexer"
 require "searchkick/index"
 require "searchkick/indexer"
@@ -19,32 +21,22 @@ require "searchkick/record_indexer"
 require "searchkick/results"
 require "searchkick/version"
 
+# integrations
+require "searchkick/railtie" if defined?(Rails)
 require "searchkick/logging" if defined?(ActiveSupport::Notifications)
 
-begin
-  require "rake"
-rescue LoadError
-  # do nothing
-end
-require "searchkick/tasks" if defined?(Rake)
-
-# background jobs
-begin
-  require "active_job"
-rescue LoadError
-  # do nothing
-end
-if defined?(ActiveJob)
-  require "searchkick/bulk_reindex_job"
-  require "searchkick/process_batch_job"
-  require "searchkick/process_queue_job"
-  require "searchkick/reindex_v2_job"
-end
-
 module Searchkick
+  # background jobs
+  autoload :BulkReindexJob,  "searchkick/bulk_reindex_job"
+  autoload :ProcessBatchJob, "searchkick/process_batch_job"
+  autoload :ProcessQueueJob, "searchkick/process_queue_job"
+  autoload :ReindexV2Job,    "searchkick/reindex_v2_job"
+
+  # errors
   class Error < StandardError; end
   class MissingIndexError < Error; end
   class UnsupportedVersionError < Error; end
+  # TODO switch to Error
   class InvalidQueryError < Elasticsearch::Transport::Transport::Errors::BadRequest; end
   class DangerousOperation < Error; end
   class ImportError < Error; end
@@ -64,10 +56,10 @@ module Searchkick
 
   def self.client
     @client ||= begin
-      require "typhoeus/adapters/faraday" if defined?(Typhoeus)
+      require "typhoeus/adapters/faraday" if defined?(Typhoeus) && Gem::Version.new(Faraday::VERSION) < Gem::Version.new("0.14.0")
 
       Elasticsearch::Client.new({
-        url: ENV["ELASTICSEARCH_URL"],
+        url: ENV["ELASTICSEARCH_URL"] || ENV["OPENSEARCH_URL"],
         transport_options: {request: {timeout: timeout}, headers: {content_type: "application/json"}},
         retry_on_failure: 2
       }.deep_merge(client_options)) do |f|
@@ -82,32 +74,65 @@ module Searchkick
   end
 
   def self.search_timeout
-    @search_timeout || timeout
+    (defined?(@search_timeout) && @search_timeout) || timeout
+  end
+
+  # private
+  def self.server_info
+    @server_info ||= client.info
   end
 
   def self.server_version
-    @server_version ||= client.info["version"]["number"]
+    @server_version ||= server_info["version"]["number"]
+  end
+
+  def self.opensearch?
+    unless defined?(@opensearch)
+      @opensearch = server_info["version"]["distribution"] == "opensearch"
+    end
+    @opensearch
   end
 
   def self.server_below?(version)
+    server_version = opensearch? ? "7.10.2" : self.server_version
     Gem::Version.new(server_version.split("-")[0]) < Gem::Version.new(version.split("-")[0])
+  end
+
+  # memoize for performance
+  def self.server_below7?
+    unless defined?(@server_below7)
+      @server_below7 = server_below?("7.0.0")
+    end
+    @server_below7
   end
 
   def self.search(term = "*", model: nil, **options, &block)
     options = options.dup
     klass = model
 
-    # make Searchkick.search(index_name: [Product]) and Product.search equivalent
+    # convert index_name into models if possible
+    # this should allow for easier upgrade
+    if options[:index_name] && !options[:models] && Array(options[:index_name]).all? { |v| v.respond_to?(:searchkick_index) }
+      options[:models] = options.delete(:index_name)
+    end
+
+    # make Searchkick.search(models: [Product]) and Product.search equivalent
     unless klass
-      index_name = Array(options[:index_name])
-      if index_name.size == 1 && index_name.first.respond_to?(:searchkick_index)
-        klass = index_name.first
-        options.delete(:index_name)
+      models = Array(options[:models])
+      if models.size == 1
+        klass = models.first
+        options.delete(:models)
       end
     end
 
+    if klass
+      if (options[:models] && Array(options[:models]) != [klass]) || Array(options[:index_name]).any? { |v| v.respond_to?(:searchkick_index) && v != klass }
+        raise ArgumentError, "Use Searchkick.search to search multiple models"
+      end
+    end
+
+    options = options.merge(block: block) if block
     query = Searchkick::Query.new(klass, term, **options)
-    block.call(query.body) if block
     if options[:execute] == false
       query
     else
@@ -137,7 +162,7 @@ module Searchkick
     end
   end
 
-  def self.callbacks(value)
+  def self.callbacks(value = nil)
     if block_given?
       previous_value = callbacks_value
       begin
@@ -175,6 +200,7 @@ module Searchkick
 
   def self.aws_credentials=(creds)
     begin
+      # TODO remove in Searchkick 5 (just use aws_sigv4)
       require "faraday_middleware/aws_signers_v4"
     rescue LoadError
       require "faraday_middleware/aws_sigv4"
@@ -184,27 +210,39 @@ module Searchkick
   end
 
   def self.reindex_status(index_name)
-    if redis
-      batches_left = Searchkick::Index.new(index_name).batches_left
-      {
-        completed: batches_left == 0,
-        batches_left: batches_left
-      }
-    else
-      raise Searchkick::Error, "Redis not configured"
-    end
+    raise Searchkick::Error, "Redis not configured" unless redis
+
+    batches_left = Searchkick::Index.new(index_name).batches_left
+    {
+      completed: batches_left == 0,
+      batches_left: batches_left
+    }
   end
 
+  # TODO use ConnectionPool::Wrapper when redis is set so this is no longer needed
   def self.with_redis
     if redis
       if redis.respond_to?(:with)
         redis.with do |r|
-          yield r
+          # Needed if you're using redis-namespace
+          #
+          # Without this running certain redis commands
+          # (like info, which we do do in Searchkick::ReindexQueue)
+          # will throw a warning.
+          if r.respond_to?(:redis)
+            yield r.redis
+          else
+            yield r
+          end
         end
       else
         yield redis
       end
     end
+  end
+
+  def self.warn(message)
+    super("[searchkick] WARNING: #{message}")
   end
 
   # private
@@ -271,6 +309,30 @@ module Searchkick
     end
   end
 
+  # private
+  # methods are forwarded to base class
+  # this check to see if scope exists on that class
+  # it's a bit tricky, but this seems to work
+  def self.relation?(klass)
+    if klass.respond_to?(:current_scope)
+      !klass.current_scope.nil?
+    elsif defined?(Mongoid::Threaded)
+      !Mongoid::Threaded.current_scope(klass).nil?
+    end
+  end
+
+  # private
+  def self.not_found_error?(e)
+    (defined?(Elasticsearch) && e.is_a?(Elasticsearch::Transport::Transport::Errors::NotFound)) ||
+    (defined?(OpenSearch) && e.is_a?(OpenSearch::Transport::Transport::Errors::NotFound))
+  end
+
+  # private
+  def self.transport_error?(e)
+    (defined?(Elasticsearch) && e.is_a?(Elasticsearch::Transport::Transport::Error)) ||
+    (defined?(OpenSearch) && e.is_a?(OpenSearch::Transport::Transport::Error))
+  end
+
   def self.unified_mappings(name, mappings)
     begin
       return mappings unless Searchkick.server_below?("7.0.0")
@@ -281,8 +343,12 @@ module Searchkick
   end
 end
 
-# TODO find better ActiveModel hook
+require "active_model/callbacks"
 ActiveModel::Callbacks.include(Searchkick::Model)
+# TODO use
+# ActiveSupport.on_load(:mongoid) do
+#   Mongoid::Document::ClassMethods.include Searchkick::Model
+# end
 
 ActiveSupport.on_load(:active_record) do
   extend Searchkick::Model

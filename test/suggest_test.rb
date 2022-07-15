@@ -21,6 +21,10 @@ class SuggestTest < Minitest::Test
     assert_suggest "How to catch a big tiger shar", "how to catch a big tiger shark", fields: [:name]
   end
 
+  def test_empty
+    assert_suggest "hi", nil
+  end
+
   def test_without_option
     store_names ["hi"] # needed to prevent ElasticsearchException - seed 668
     assert_raises(RuntimeError) { Product.search("hi").suggestions }
@@ -90,7 +94,7 @@ class SuggestTest < Minitest::Test
   protected
 
   def assert_suggest(term, expected, options = {})
-    result = Product.search(term, **options, suggest: true).suggestions.first
+    result = Product.search(term, suggest: true, **options).suggestions.first
     if expected.nil?
       assert_nil result
     else
@@ -100,6 +104,6 @@ class SuggestTest < Minitest::Test
 
   # any order
   def assert_suggest_all(term, expected, options = {})
-    assert_equal expected.sort, Product.search(term, **options, suggest: true).suggestions.sort
+    assert_equal expected.sort, Product.search(term, suggest: true, **options).suggestions.sort
   end
 end

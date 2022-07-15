@@ -2,796 +2,62 @@ require "bundler/setup"
 Bundler.require(:default)
 require "minitest/autorun"
 require "minitest/pride"
-require "logger"
 require "active_support/core_ext" if defined?(NoBrainer)
 require "active_support/notifications"
 
-Searchkick.index_suffix = ENV["TEST_ENV_NUMBER"]
-
 ENV["RACK_ENV"] = "test"
 
-Minitest::Test = Minitest::Unit::TestCase unless defined?(Minitest::Test)
-
-if !defined?(ParallelTests) || ParallelTests.first_process?
-  File.delete("elasticsearch.log") if File.exist?("elasticsearch.log")
+# for reloadable synonyms
+if ENV["CI"]
+  ENV["ES_PATH"] ||= File.join(ENV["HOME"], Searchkick.opensearch? ? "opensearch" : "elasticsearch", Searchkick.server_version)
 end
 
-Searchkick.client.transport.logger = Logger.new("elasticsearch.log")
+$logger = ActiveSupport::Logger.new(ENV["VERBOSE"] ? STDOUT : nil)
+
+if defined?(OpenSearch)
+  Searchkick.client = OpenSearch::Client.new
+end
+
+if Searchkick.client.transport.respond_to?(:transport)
+  Searchkick.client.transport.transport.logger = $logger
+else
+  Searchkick.client.transport.logger = $logger
+end
 Searchkick.search_timeout = 5
+Searchkick.index_suffix = ENV["TEST_ENV_NUMBER"] # for parallel tests
 
-if defined?(Redis)
+# add to elasticsearch-7.0.0/config/
+Searchkick.wordnet_path = "wn_s.pl" if ENV["WORDNET"]
+
+puts "Running against #{Searchkick.opensearch? ? "OpenSearch" : "Elasticsearch"} #{Searchkick.server_version}"
+
+Searchkick.redis =
   if defined?(ConnectionPool)
-    Searchkick.redis = ConnectionPool.new { Redis.new }
+    ConnectionPool.new { Redis.new(logger: $logger) }
   else
-    Searchkick.redis = Redis.new
+    Redis.new(logger: $logger)
   end
-end
-
-puts "Running against Elasticsearch #{Searchkick.server_version}"
 
 I18n.config.enforce_available_locales = true
 
-if defined?(ActiveJob)
-  ActiveJob::Base.logger = nil
-  ActiveJob::Base.queue_adapter = :inline
-end
+ActiveJob::Base.logger = $logger
+ActiveJob::Base.queue_adapter = :inline
 
 ActiveSupport::LogSubscriber.logger = ActiveSupport::Logger.new(STDOUT) if ENV["NOTIFICATIONS"]
 
-def nobrainer?
-  defined?(NoBrainer)
-end
-
-def cequel?
-  defined?(Cequel)
-end
-
 if defined?(Mongoid)
-  Mongoid.logger.level = Logger::INFO
-  Mongo::Logger.logger.level = Logger::INFO if defined?(Mongo::Logger)
-
-  Mongoid.configure do |config|
-    config.connect_to "searchkick_test"
-  end
-
-  class Product
-    include Mongoid::Document
-    include Mongoid::Timestamps
-
-    field :name
-    field :store_id, type: Integer
-    field :in_stock, type: Boolean
-    field :backordered, type: Boolean
-    field :orders_count, type: Integer
-    field :found_rate, type: BigDecimal
-    field :price, type: Integer
-    field :color
-    field :latitude, type: BigDecimal
-    field :longitude, type: BigDecimal
-    field :description
-    field :alt_description
-  end
-
-  class Store
-    include Mongoid::Document
-    has_many :products
-
-    field :name
-  end
-
-  class Review
-    include Mongoid::Document
-    belongs_to :product
-
-    field :name
-  end
-
-  class Region
-    include Mongoid::Document
-
-    field :name
-    field :text
-  end
-
-  class Speaker
-    include Mongoid::Document
-
-    field :name
-  end
-
-  class Animal
-    include Mongoid::Document
-
-    field :name
-  end
-
-  class Dog < Animal
-  end
-
-  class Cat < Animal
-  end
-
-  class Sku
-    include Mongoid::Document
-
-    field :name
-  end
-
-  class Song
-    include Mongoid::Document
-
-    field :name
-  end
+  require_relative "support/mongoid"
 elsif defined?(NoBrainer)
-  NoBrainer.configure do |config|
-    config.app_name = :searchkick
-    config.environment = :test
-  end
-
-  class Product
-    include NoBrainer::Document
-    include NoBrainer::Document::Timestamps
-
-    field :id,           type: Object
-    field :name,         type: Text
-    field :in_stock,     type: Boolean
-    field :backordered,  type: Boolean
-    field :orders_count, type: Integer
-    field :found_rate
-    field :price,        type: Integer
-    field :color,        type: String
-    field :latitude
-    field :longitude
-    field :description, type: String
-    field :alt_description, type: String
-
-    belongs_to :store, validates: false
-  end
-
-  class Store
-    include NoBrainer::Document
-
-    field :id,   type: Object
-    field :name, type: String
-  end
-
-  class Review
-    include NoBrainer::Document
-
-    field :id,   type: Object
-    field :name, type: String
-    belongs_to :product, validates: false
-  end
-
-  class Region
-    include NoBrainer::Document
-
-    field :id,   type: Object
-    field :name, type: String
-    field :text, type: Text
-  end
-
-  class Speaker
-    include NoBrainer::Document
-
-    field :id,   type: Object
-    field :name, type: String
-  end
-
-  class Animal
-    include NoBrainer::Document
-
-    field :id,   type: Object
-    field :name, type: String
-  end
-
-  class Dog < Animal
-  end
-
-  class Cat < Animal
-  end
-
-  class Sku
-    include NoBrainer::Document
-
-    field :id,   type: String
-    field :name, type: String
-  end
-
-  class Song
-    include NoBrainer::Document
-
-    field :id,   type: Object
-    field :name, type: String
-  end
+  require_relative "support/nobrainer"
 elsif defined?(Cequel)
-  cequel =
-    Cequel.connect(
-      host: "127.0.0.1",
-      port: 9042,
-      keyspace: "searchkick_test",
-      default_consistency: :all
-    )
-  # cequel.logger = ActiveSupport::Logger.new(STDOUT)
-  cequel.schema.drop! if cequel.schema.exists?
-  cequel.schema.create!
-  Cequel::Record.connection = cequel
-
-  class Product
-    include Cequel::Record
-
-    key :id, :uuid, auto: true
-    column :name, :text, index: true
-    column :store_id, :int
-    column :in_stock, :boolean
-    column :backordered, :boolean
-    column :orders_count, :int
-    column :found_rate, :decimal
-    column :price, :int
-    column :color, :text
-    column :latitude, :decimal
-    column :longitude, :decimal
-    column :description, :text
-    column :alt_description, :text
-    column :created_at, :timestamp
-  end
-
-  class Store
-    include Cequel::Record
-
-    key :id, :timeuuid, auto: true
-    column :name, :text
-
-    # has issue with id serialization
-    def search_data
-      {
-        name: name
-      }
-    end
-  end
-
-  class Review
-    include Cequel::Record
-
-    key :id, :timeuuid, auto: true
-    column :name, :text
-
-    def search_data
-      {
-        name: name
-      }
-    end
-  end
-
-  class Region
-    include Cequel::Record
-
-    key :id, :timeuuid, auto: true
-    column :name, :text
-    column :text, :text
-  end
-
-  class Speaker
-    include Cequel::Record
-
-    key :id, :timeuuid, auto: true
-    column :name, :text
-  end
-
-  class Animal
-    include Cequel::Record
-
-    key :id, :timeuuid, auto: true
-    column :name, :text
-
-    # has issue with id serialization
-    def search_data
-      {
-        name: name
-      }
-    end
-  end
-
-  class Dog < Animal
-  end
-
-  class Cat < Animal
-  end
-
-  class Sku
-    include Cequel::Record
-
-    key :id, :uuid
-    column :name, :text
-  end
-
-  class Song
-    include Cequel::Record
-
-    key :id, :timeuuid, auto: true
-    column :name, :text
-  end
-
-  [Product, Store, Review, Region, Speaker, Animal, Sku, Song].each(&:synchronize_schema)
+  require_relative "support/cequel"
 else
-  require "active_record"
-
-  # for debugging
-  # ActiveRecord::Base.logger = Logger.new(STDOUT)
-
-  # rails does this in activerecord/lib/active_record/railtie.rb
-  ActiveRecord::Base.default_timezone = :utc
-  ActiveRecord::Base.time_zone_aware_attributes = true
-
-  # migrations
-  ActiveRecord::Base.establish_connection adapter: "sqlite3", database: ":memory:"
-
-  ActiveRecord::Base.raise_in_transactional_callbacks = true if ActiveRecord::VERSION::STRING.start_with?("4.2.")
-
-  if defined?(Apartment)
-    class Rails
-      def self.env
-        ENV["RACK_ENV"]
-      end
-    end
-
-    tenants = ["tenant1", "tenant2"]
-    Apartment.configure do |config|
-      config.tenant_names = tenants
-      config.database_schema_file = false
-      config.excluded_models = ["Product", "Store", "Animal", "Dog", "Cat", "Review"]
-    end
-
-    class Tenant < ActiveRecord::Base
-      searchkick index_prefix: -> { Apartment::Tenant.current }
-    end
-
-    tenants.each do |tenant|
-      begin
-        Apartment::Tenant.create(tenant)
-      rescue Apartment::TenantExists
-        # do nothing
-      end
-      Apartment::Tenant.switch!(tenant)
-
-      ActiveRecord::Migration.create_table :tenants, force: true do |t|
-        t.string :name
-        t.timestamps null: true
-      end
-
-      Tenant.reindex
-    end
-
-    Apartment::Tenant.reset
-  end
-
-  ActiveRecord::Migration.create_table :products do |t|
-    t.string :name
-    t.integer :store_id
-    t.boolean :in_stock
-    t.boolean :backordered
-    t.integer :orders_count
-    t.decimal :found_rate
-    t.integer :price
-    t.string :color
-    t.decimal :latitude, precision: 10, scale: 7
-    t.decimal :longitude, precision: 10, scale: 7
-    t.text :description
-    t.text :alt_description
-    t.timestamps null: true
-  end
-
-  ActiveRecord::Migration.create_table :stores do |t|
-    t.string :name
-    t.json :nested_json
-  end
-
-  ActiveRecord::Migration.create_table :employees do |t|
-    t.string :name
-    t.integer :age
-    t.integer :store_id
-  end
-
-  ActiveRecord::Migration.create_table :time_cards do |t|
-    t.integer :hours
-    t.integer :employee_id
-  end
-
-  ActiveRecord::Migration.create_table :reviews do |t|
-    t.string :name
-    t.integer :stars
-    t.integer :employee_id
-  end
-
-  ActiveRecord::Migration.create_table :comments do |t|
-    t.string :status
-    t.string :message
-    t.integer :review_id
-  end
-
-  ActiveRecord::Migration.create_table :regions do |t|
-    t.string :name
-    t.text :text
-  end
-
-  ActiveRecord::Migration.create_table :speakers do |t|
-    t.string :name
-  end
-
-  ActiveRecord::Migration.create_table :animals do |t|
-    t.string :name
-    t.string :type
-  end
-
-  ActiveRecord::Migration.create_table :skus, id: :uuid do |t|
-    t.string :name
-  end
-
-  ActiveRecord::Migration.create_table :songs do |t|
-    t.string :name
-  end
-
-  class Product < ActiveRecord::Base
-    belongs_to :store
-  end
-
-  class Review < ActiveRecord::Base
-    belongs_to :employee
-    has_many :comments
-  end
-
-  class Comment < ActiveRecord::Base
-    belongs_to :review
-  end
-
-  class Employee < ActiveRecord::Base
-    belongs_to :store
-    has_many :reviews
-    has_many :time_cards
-  end
-
-  class TimeCard < ActiveRecord::Base
-    belongs_to :employee
-  end
-
-  class Store < ActiveRecord::Base
-    has_many :products
-    has_many :employees
-  end
-
-  class Region < ActiveRecord::Base
-  end
-
-  class Speaker < ActiveRecord::Base
-  end
-
-  class Animal < ActiveRecord::Base
-  end
-
-  class Dog < Animal
-  end
-
-  class Cat < Animal
-  end
-
-  class Sku < ActiveRecord::Base
-  end
-
-  class Song < ActiveRecord::Base
-  end
+  require_relative "support/activerecord"
 end
 
-class Product
-  searchkick \
-    synonyms: [
-      ["clorox", "bleach"],
-      ["scallion", "greenonion"],
-      ["saran wrap", "plastic wrap"],
-      ["qtip", "cottonswab"],
-      ["burger", "hamburger"],
-      ["bandaid", "bandages"],
-      ["UPPERCASE", "lowercase"],
-      "lightbulb => led,lightbulb",
-      "lightbulb => halogenlamp"
-    ],
-    suggest: [:name, :color],
-    conversions: [:conversions],
-    locations: [:location, :multiple_locations],
-    text_start: [:name],
-    text_middle: [:name],
-    text_end: [:name],
-    word_start: [:name],
-    word_middle: [:name],
-    word_end: [:name],
-    highlight: [:name],
-    filterable: [:name, :color, :description],
-    similarity: "BM25",
-    match: ENV["MATCH"] ? ENV["MATCH"].to_sym : nil
-
-  attr_accessor :conversions, :user_ids, :aisle, :details
-
-  def search_data
-    serializable_hash.except("id", "_id").merge(
-      conversions: conversions,
-      user_ids: user_ids,
-      location: {lat: latitude, lon: longitude},
-      multiple_locations: [{lat: latitude, lon: longitude}, {lat: 0, lon: 0}],
-      aisle: aisle,
-      details: details
-    )
-  end
-
-  def should_index?
-    name != "DO NOT INDEX"
-  end
-
-  def search_name
-    {
-      name: name
-    }
-  end
-
-  def search_routing
-    name
-  end
-end
-
-class Store
-  searchkick \
-    routing: true,
-    merge_mappings: true,
-    mappings: Searchkick.unified_mappings(
-      :store,
-      {
-        properties: {
-          nested_field: {
-            type: 'nested',
-            properties: {
-              name: {type: 'text'}
-            }
-          },
-          employees: {
-            type: 'nested',
-            properties: {
-              reviews: {
-                type: 'nested',
-                properties: {
-                  comments: {
-                    type: 'nested'
-                  }
-                }
-              },
-              time_cards: {
-                type: 'nested'
-              }
-            }
-          }
-        }
-      }
-    )
-
-  def search_document_id
-    id
-  end
-
-  def search_routing
-    name
-  end
-
-  def search_data
-    data = {employees: []}
-    employees.map{|e| data[:employees] << {
-        name: e.try(:name),
-        age: e.try(:age),
-        reviews: e.try(:reviews).collect{ |r|
-          {
-            name: r.try(:name),
-            stars: r.try(:stars),
-            comments: r.comments.collect{ |c|
-              {
-                status: c.try(:status),
-                message: c.try(:message)
-              }
-            }
-          }
-        },
-        time_cards: e.try(:time_cards).collect{ |tc|
-          {
-            hours: tc.try(:hours)
-          }
-        }
-      }
-    }
-    data[:nested_field] = nested_json&.dig('nested_field')
-    serializable_hash.except("id", "_id").merge(
-      data
-    )
-  end
-end
-
-class Review
-  searchkick \
-    routing: true,
-    merge_mappings: true,
-    mappings: Searchkick.unified_mappings(
-      :review,
-      {
-        properties: {
-          name: {type: "keyword"},
-          stars: {type: "keyword"}
-        }
-      }
-    )
-
-  def search_document_id
-    id
-  end
-
-  def search_routing
-    name
-  end
-
-  def search_data
-    serializable_hash.except("id", "_id").merge(
-      name: name,
-      stars: stars
-    )
-  end
-end
-
-class Comment
-  searchkick \
-    routing: true,
-    merge_mappings: true,
-    mappings: Searchkick.unified_mappings(
-      :comment,
-      {
-        properties: {
-          status: {type: "keyword"},
-          message: {type: "keyword"}
-        }
-      }
-    )
-
-  def search_document_id
-    id
-  end
-
-  def search_routing
-    status
-  end
-
-  def search_data
-    serializable_hash.except("id", "_id").merge(
-      status: status,
-      message: message
-    )
-  end
-end
-
-class Employee
-  searchkick \
-    routing: true,
-    merge_mappings: true,
-    mappings: Searchkick.unified_mappings(
-      :employee,
-      {
-        properties: {
-          name: {type: "keyword"},
-          age: {type: "keyword"},
-          reviews: {
-            type: 'nested'
-          },
-          time_cards: {
-            type: 'nested'
-          }
-        }
-      }
-    )
-
-
-  def search_document_id
-    id
-  end
-
-  def search_routing
-    name
-  end
-
-  def search_data
-    serializable_hash.except("id", "_id").merge(
-      name: name,
-      reviews: {
-        name: reviews.last.try(:name)
-      },
-      time_cards: {
-        hours: time_cards.last.try(:hours)
-      }
-    )
-  end
-end
-
-class TimeCard
-  searchkick \
-    routing: true,
-    merge_mappings: true,
-    mappings: Searchkick.unified_mappings(
-      :time_card,
-      {
-        properties: {
-          hours: {type: 'keyword'}
-        }
-      }
-    )
-
-
-  def search_document_id
-    id
-  end
-
-  def search_routing
-    hours
-  end
-
-  def search_data
-    serializable_hash.except("id", "_id").merge(
-      hours: hours
-    )
-  end
-end
-
-class Region
-  searchkick \
-    geo_shape: {
-      territory: {tree: "quadtree", precision: "10km"}
-    }
-
-  attr_accessor :territory
-
-  def search_data
-    {
-      name: name,
-      text: text,
-      territory: territory
-    }
-  end
-end
-
-class Speaker
-  searchkick \
-    conversions: ["conversions_a", "conversions_b"]
-
-  attr_accessor :conversions_a, :conversions_b, :aisle
-
-  def search_data
-    serializable_hash.except("id", "_id").merge(
-      conversions_a: conversions_a,
-      conversions_b: conversions_b,
-      aisle: aisle
-    )
-  end
-end
-
-class Animal
-  searchkick \
-    inheritance: true,
-    text_start: [:name],
-    suggest: [:name],
-    index_name: -> { "#{name.tableize}-#{Date.today.year}#{Searchkick.index_suffix}" },
-    callbacks: defined?(ActiveJob) ? :async : true
-    # wordnet: true
-end
-
-class Sku
-  searchkick callbacks: defined?(ActiveJob) ? :async : true
-end
-
-class Song
-  searchkick
-
-  def search_routing
-    name
-  end
+# models
+Dir["#{__dir__}/models/*"].each do |file|
+  require file
 end
 
 Product.searchkick_index.delete if Product.searchkick_index.exists?
@@ -799,6 +65,7 @@ Product.reindex
 Product.reindex # run twice for both index paths
 Product.create!(name: "Set mapping")
 
+AltStore.reindex
 Store.reindex
 Animal.reindex
 Speaker.reindex
@@ -811,6 +78,7 @@ TimeCard.reindex
 class Minitest::Test
   def setup
     Product.destroy_all
+    AltStore.destroy_all
     Store.destroy_all
     Animal.destroy_all
     Speaker.destroy_all
@@ -822,35 +90,43 @@ class Minitest::Test
 
   protected
 
-  def store(documents, klass = Product)
-    documents.shuffle.each do |document|
-      klass.create!(document)
+  def store(documents, klass = default_model, reindex: true)
+    if reindex
+      documents.shuffle.each do |document|
+        klass.create!(document)
+      end
+      klass.searchkick_index.refresh
+    else
+      Searchkick.callbacks(false) do
+        documents.shuffle.each do |document|
+          klass.create!(document)
+        end
+      end
     end
-    klass.searchkick_index.refresh
   end
 
-  def store_names(names, klass = Product)
-    store names.map { |name| {name: name} }, klass
+  def store_names(names, klass = default_model, reindex: true)
+    store names.map { |name| {name: name} }, klass, reindex: reindex
   end
 
   # no order
-  def assert_search(term, expected, options = {}, klass = Product)
+  def assert_search(term, expected, options = {}, klass = default_model)
     assert_equal expected.sort, klass.search(term, **options).map(&:name).sort
   end
 
-  def assert_order(term, expected, options = {}, klass = Product)
+  def assert_order(term, expected, options = {}, klass = default_model)
     assert_equal expected, klass.search(term, **options).map(&:name)
   end
 
-  def assert_equal_scores(term, options = {}, klass = Product)
+  def assert_equal_scores(term, options = {}, klass = default_model)
     assert_equal 1, klass.search(term, **options).hits.map { |a| a["_score"] }.uniq.size
   end
 
-  def assert_first(term, expected, options = {}, klass = Product)
+  def assert_first(term, expected, options = {}, klass = default_model)
     assert_equal expected, klass.search(term, **options).map(&:name).first
   end
 
-  def assert_misspellings(term, expected, misspellings = {}, klass = Product)
+  def assert_misspellings(term, expected, misspellings = {}, klass = default_model)
     options = {
       fields: [:name, :color],
       misspellings: misspellings
@@ -858,7 +134,14 @@ class Minitest::Test
     assert_search(term, expected, options, klass)
   end
 
-  def with_options(klass, options)
+  def assert_warns(message)
+    _, stderr = capture_io do
+      yield
+    end
+    assert_match "[searchkick] WARNING: #{message}", stderr
+  end
+
+  def with_options(options, klass = default_model)
     previous_options = klass.searchkick_options.dup
     begin
       klass.searchkick_options.merge!(options)
@@ -868,5 +151,25 @@ class Minitest::Test
       klass.searchkick_options.clear
       klass.searchkick_options.merge!(previous_options)
     end
+  end
+
+  def activerecord?
+    defined?(ActiveRecord)
+  end
+
+  def nobrainer?
+    defined?(NoBrainer)
+  end
+
+  def cequel?
+    defined?(Cequel)
+  end
+
+  def default_model
+    Product
+  end
+
+  def ci?
+    ENV["CI"]
   end
 end

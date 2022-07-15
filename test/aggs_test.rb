@@ -20,7 +20,7 @@ class AggsTest < Minitest::Test
   end
 
   def test_order
-    agg = Product.search("Product", aggs: {color: {order: {"_term" => "desc"}}}).aggs["color"]
+    agg = Product.search("Product", aggs: {color: {order: {_key: "desc"}}}).aggs["color"]
     assert_equal %w(red green blue), agg["buckets"].map { |b| b["key"] }
   end
 
@@ -36,8 +36,7 @@ class AggsTest < Minitest::Test
 
   def test_script
     source = "'Color: ' + _value"
-    script = Searchkick.server_below?("5.6") ? {inline: source} : {source: source}
-    agg = Product.search("Product", aggs: {color: {script: script}}).aggs["color"]
+    agg = Product.search("Product", aggs: {color: {script: {source: source}}}).aggs["color"]
     assert_equal ({"Color: blue" => 1, "Color: green" => 1, "Color: red" => 1}), buckets_as_hash(agg)
   end
 
@@ -106,7 +105,7 @@ class AggsTest < Minitest::Test
   def test_aggs_group_by_date
     store [{name: "Old Product", created_at: 3.years.ago}]
     products =
-      Product.search("Product", **{
+      Product.search("Product",
         where: {
           created_at: {lt: Time.now}
         },
@@ -114,11 +113,11 @@ class AggsTest < Minitest::Test
           products_per_year: {
             date_histogram: {
               field: :created_at,
-              interval: :year
+              interval_key => :year
             }
           }
         }
-      })
+      )
 
     assert_equal 4, products.aggs["products_per_year"]["buckets"].size
   end
@@ -151,7 +150,7 @@ class AggsTest < Minitest::Test
 
   def test_aggs_avg
     products =
-      Product.search("*", **{
+      Product.search("*",
         aggs: {
           avg_price: {
             avg: {
@@ -159,13 +158,13 @@ class AggsTest < Minitest::Test
             }
           }
         }
-      })
+      )
     assert_equal 16.5, products.aggs["avg_price"]["value"]
   end
 
   def test_aggs_cardinality
     products =
-      Product.search("*", **{
+      Product.search("*",
         aggs: {
           total_stores: {
             cardinality: {
@@ -173,13 +172,13 @@ class AggsTest < Minitest::Test
             }
           }
         }
-      })
+      )
     assert_equal 3, products.aggs["total_stores"]["value"]
   end
 
   def test_aggs_min_max
     products =
-      Product.search("*", **{
+      Product.search("*",
         aggs: {
           min_price: {
             min: {
@@ -192,14 +191,14 @@ class AggsTest < Minitest::Test
             }
           }
         }
-      })
+      )
     assert_equal 5, products.aggs["min_price"]["value"]
     assert_equal 25, products.aggs["max_price"]["value"]
   end
 
   def test_aggs_sum
     products =
-      Product.search("*", **{
+      Product.search("*",
         aggs: {
           sum_price: {
             sum: {
@@ -207,7 +206,7 @@ class AggsTest < Minitest::Test
             }
           }
         }
-      })
+      )
     assert_equal 66, products.aggs["sum_price"]["value"]
   end
 
@@ -234,7 +233,7 @@ class AggsTest < Minitest::Test
   protected
 
   def search_aggregate_by_day_with_time_zone(query, time_zone = '-8:00')
-    Product.search(query, **{
+    Product.search(query,
       where: {
         created_at: {lt: Time.now}
       },
@@ -242,12 +241,12 @@ class AggsTest < Minitest::Test
         products_per_day: {
           date_histogram: {
             field: :created_at,
-            interval: :day,
+            interval_key => :day,
             time_zone: time_zone
           }
         }
       }
-    })
+    )
   end
 
   def buckets_as_hash(agg)
@@ -263,5 +262,9 @@ class AggsTest < Minitest::Test
     Hash[Product.search("Product", **options).aggs.map do |field, filtered_agg|
       [field, buckets_as_hash(filtered_agg)]
     end]
+  end
+
+  def interval_key
+    Searchkick.server_below?("7.4.0") ? :interval : :calendar_interval
   end
 end
