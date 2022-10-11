@@ -146,28 +146,28 @@ module Searchkick
       end
     end
 
-    def bulk_delete(records)
+    def bulk_delete(records, records_data: nil)
       return if records.empty?
 
       notify_bulk(records, "Delete") do
-        queue_delete(records)
+        queue_delete(records, records_data: records_data)
       end
     end
 
-    def bulk_index(records)
+    def bulk_index(records, records_data: nil)
       return if records.empty?
 
       notify_bulk(records, "Import") do
-        queue_index(records)
+        queue_index(records, records_data: records_data)
       end
     end
     alias_method :import, :bulk_index
 
-    def bulk_update(records, method_name)
+    def bulk_update(records, method_name, records_data: nil)
       return if records.empty?
 
       notify_bulk(records, "Update") do
-        queue_update(records, method_name)
+        queue_update(records, method_name, records_data: records_data)
       end
     end
 
@@ -314,16 +314,16 @@ module Searchkick
       Searchkick.client
     end
 
-    def queue_index(records)
-      Searchkick.indexer.queue(records.map { |r| RecordData.new(self, r).index_data })
+    def queue_index(records, records_data: nil)
+      Searchkick.indexer.queue(records_data || records.map { |r| RecordData.new(self, r).index_data })
     end
 
-    def queue_delete(records)
-      Searchkick.indexer.queue(records.reject { |r| r.id.blank? }.map { |r| RecordData.new(self, r).delete_data })
+    def queue_delete(records, records_data: nil)
+      Searchkick.indexer.queue(records_data || records.reject { |r| r.id.blank? }.map { |r| RecordData.new(self, r).delete_data })
     end
 
-    def queue_update(records, method_name)
-      Searchkick.indexer.queue(records.map { |r| RecordData.new(self, r).update_data(method_name) })
+    def queue_update(records, method_name, records_data: nil)
+      Searchkick.indexer.queue(records_data || records.map { |r| RecordData.new(self, r).update_data(method_name) })
     end
 
     def relation_indexer
@@ -340,9 +340,17 @@ module Searchkick
 
     def reindex_records(object, mode: nil, refresh: false, **options)
       mode ||= Searchkick.callbacks_value || @options[:callbacks] || :inline
-      mode = :inline if mode == :bulk
 
-      result = RecordIndexer.new(self).reindex(object, mode: mode, full: false, **options)
+      grouped_object = object.to_a.group_by { |record|
+        individual_mode = mode.is_a?(Proc) ? record.instance_exec(&mode) : mode
+        individual_mode = :inline if individual_mode == :bulk
+        individual_mode
+      }
+      return if grouped_object.empty?
+
+      result = grouped_object.all? { |individual_mode, records|
+        RecordIndexer.new(self).reindex(records, mode: individual_mode, full: false, **options)
+      }
       self.refresh if refresh
       result
     end

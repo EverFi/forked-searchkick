@@ -2,22 +2,23 @@ module Searchkick
   class RecordData
     TYPE_KEYS = ["type", :type]
 
-    attr_reader :index, :record
+    attr_reader :index, :record, :external_version
 
-    def initialize(index, record)
+    def initialize(index, record, external_version: nil)
       @index = index
       @record = record
+      @external_version = external_version
     end
 
     def index_data
       data = record_data
-      data[:data] = search_data
+      data[:data] = timestamped_search_data
       {index: data}
     end
 
     def update_data(method_name)
       data = record_data
-      data[:data] = {doc: search_data(method_name)}
+      data[:data] = {doc: timestamped_search_data(method_name)}
       {update: data}
     end
 
@@ -41,10 +42,22 @@ module Searchkick
         _id: search_id
       }
       data[:routing] = record.search_routing if record.respond_to?(:search_routing)
+
+      if external_version
+        data[:version] = external_version
+        data[:version_type] = 'external'
+      end
+
       data
     end
 
     private
+
+    def timestamped_search_data(method_name = nil)
+      search_data(method_name).merge(
+        indexed_at: Time.now.utc
+      )
+    end
 
     def search_data(method_name = nil)
       partial_reindex = !method_name.nil?

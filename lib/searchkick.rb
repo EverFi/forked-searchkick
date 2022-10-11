@@ -29,6 +29,9 @@ require "searchkick/results"
 require "searchkick/version"
 require "searchkick/where"
 
+require "searchkick/index_version" if defined?(::ActiveRecord)
+require "searchkick/thread_safe_record_indexer"
+
 # integrations
 require "searchkick/railtie" if defined?(Rails)
 
@@ -235,6 +238,21 @@ module Searchkick
     end
   end
 
+  def self.refresh(value)
+    unless block_given?
+      self.refresh_value = value
+      return
+    end
+
+    previous_value = refresh_value
+    begin
+      self.refresh_value = value
+      yield
+    ensure
+      self.refresh_value = previous_value
+    end
+  end
+
   def self.aws_credentials=(creds)
     require "faraday_middleware/aws_sigv4"
 
@@ -256,7 +274,16 @@ module Searchkick
     if redis
       if redis.respond_to?(:with)
         redis.with do |r|
-          yield r
+          # Needed if you're using redis-namespace
+          #
+          # Without this running certain redis commands
+          # (like info, which we do do in Searchkick::ReindexQueue)
+          # will throw a warning.
+          if r.respond_to?(:redis)
+            yield r.redis
+          else
+            yield r
+          end
         end
       else
         yield redis
@@ -319,6 +346,15 @@ module Searchkick
   # private
   def self.signer_middleware_aws_params
     {service: "es", region: "us-east-1"}.merge(aws_credentials)
+  end
+
+  def self.refresh_value
+    Thread.current[:searchkick_refresh_value]
+  end
+
+  # private
+  def self.refresh_value=(value)
+    Thread.current[:searchkick_refresh_value] = value
   end
 
   # private

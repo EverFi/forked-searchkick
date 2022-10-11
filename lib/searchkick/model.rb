@@ -7,8 +7,12 @@ module Searchkick
         :filterable, :geo_shape, :highlight, :ignore_above, :index_name, :index_prefix, :inheritance, :language,
         :locations, :mappings, :match, :max_result_window, :merge_mappings, :routing, :searchable, :search_synonyms, :settings, :similarity,
         :special_characters, :stem, :stemmer, :stem_conversions, :stem_exclusion, :stemmer_override, :suggest, :synonyms, :text_end,
-        :text_middle, :text_start, :unscope, :word, :word_end, :word_middle, :word_start]
+        :text_middle, :text_start, :unscope, :word, :word_end, :word_middle, :word_start, :thread_safe]
       raise ArgumentError, "unknown keywords: #{unknown_keywords.join(", ")}" if unknown_keywords.any?
+
+      if options[:thread_safe] && !respond_to?(:insert_all)
+        raise ArgumentError, 'Use ActiveRecord > 6.0 in order apply thread_safe mode'
+      end
 
       raise "Only call searchkick once per model" if respond_to?(:searchkick_index)
 
@@ -18,9 +22,6 @@ module Searchkick
       options[:class_name] = model_name.name
 
       callbacks = options.key?(:callbacks) ? options[:callbacks] : :inline
-      unless [:inline, true, false, :async, :queue].include?(callbacks)
-        raise ArgumentError, "Invalid value for callbacks"
-      end
 
       base = self
 
@@ -28,7 +29,9 @@ module Searchkick
       include(mod)
       mod.module_eval do
         def reindex(method_name = nil, mode: nil, refresh: false)
-          self.class.searchkick_index.reindex([self], method_name: method_name, mode: mode, refresh: refresh, single: true)
+          arp = after_reindex_params if respond_to?(:after_reindex_params)
+
+          self.class.searchkick_index.reindex([self], method_name: method_name, mode: mode, refresh: refresh, single: true, after_reindex_params: { self.id.to_s => arp })
         end unless base.method_defined?(:reindex)
 
         def similar(**options)
@@ -96,13 +99,23 @@ module Searchkick
           end
         end
 
+
+        if_callbacks_proc = -> {
+          default_callbacks = callbacks.is_a?(Proc) ? instance_exec(&callbacks) : callbacks
+
+          unless [:inline, true, false, :async, :queue].include?(default_callbacks)
+            raise ArgumentError, "Invalid value for callbacks"
+          end
+
+          Searchkick.callbacks?(default: default_callbacks)
+        }
         # always add callbacks, even when callbacks is false
         # so Model.callbacks block can be used
         if respond_to?(:after_commit)
-          after_commit :reindex, if: -> { Searchkick.callbacks?(default: callbacks) }
+          after_commit :reindex, if: if_callbacks_proc
         elsif respond_to?(:after_save)
-          after_save :reindex, if: -> { Searchkick.callbacks?(default: callbacks) }
-          after_destroy :reindex, if: -> { Searchkick.callbacks?(default: callbacks) }
+          after_save :reindex, if: if_callbacks_proc
+          after_destroy :reindex, if: if_callbacks_proc
         end
       end
     end

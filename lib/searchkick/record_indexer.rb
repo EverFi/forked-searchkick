@@ -6,7 +6,7 @@ module Searchkick
       @index = index
     end
 
-    def reindex(records, mode:, method_name:, full: false, single: false)
+    def reindex(records, mode:, method_name:, full: false, single: false, after_reindex_params: nil)
       # prevents exists? check if records is a relation
       records = records.to_a
       return if records.empty?
@@ -33,7 +33,8 @@ module Searchkick
             record.id.to_s,
             method_name ? method_name.to_s : nil,
             routing: routing,
-            index_name: index.name
+            index_name: index.name,
+            after_reindex_params: after_reindex_params
           )
         else
           Searchkick::BulkReindexJob.perform_later(
@@ -51,7 +52,7 @@ module Searchkick
         index.reindex_queue.push_records(records)
       when true, :inline
         index_records, other_records = records.partition { |r| index_record?(r) }
-        import_inline(index_records, !full ? other_records : [], method_name: method_name, single: single)
+        Searchkick::ThreadSafeRecordIndexer.new(index).reindex_stale_records(index_records, !full ? other_records : [], method_name: method_name, single: single, after_reindex_params: after_reindex_params)
       else
         raise ArgumentError, "Invalid value for mode"
       end
@@ -60,7 +61,7 @@ module Searchkick
       true
     end
 
-    def reindex_items(klass, items, method_name:, single: false)
+    def fetch_items(klass, items)
       routing = items.to_h { |r| [r[:id], r[:routing]] }
       record_ids = routing.keys
 
@@ -76,32 +77,36 @@ module Searchkick
           construct_record(klass, id, routing[id])
         end
 
-      import_inline(records, delete_records, method_name: method_name, single: single)
+      [records, delete_records]
+    end
+
+    # import in single request with retries
+    def import_inline(index_records, delete_records, method_name:, single:, after_reindex_params: nil, records_data: nil, delete_records_data: nil)
+      return if index_records.empty? && delete_records.empty?
+
+      maybe_bulk(index_records, delete_records, method_name, single) do
+        if index_records.any?
+          if method_name
+            index.bulk_update(index_records, method_name, records_data: records_data)
+          else
+            index.bulk_index(index_records, records_data: records_data)
+          end
+
+          run_after_reindex_callback(index_records, after_reindex_params)
+        end
+
+        if delete_records.any?
+          index.bulk_delete(delete_records, records_data: delete_records_data)
+
+          run_after_reindex_callback(delete_records, after_reindex_params)
+        end
+      end
     end
 
     private
 
     def index_record?(record)
       record.persisted? && !record.destroyed? && record.should_index?
-    end
-
-    # import in single request with retries
-    def import_inline(index_records, delete_records, method_name:, single:)
-      return if index_records.empty? && delete_records.empty?
-
-      maybe_bulk(index_records, delete_records, method_name, single) do
-        if index_records.any?
-          if method_name
-            index.bulk_update(index_records, method_name)
-          else
-            index.bulk_index(index_records)
-          end
-        end
-
-        if delete_records.any?
-          index.bulk_delete(delete_records)
-        end
-      end
     end
 
     def maybe_bulk(index_records, delete_records, method_name, single)
@@ -158,6 +163,14 @@ module Searchkick
           retry
         end
         raise e
+      end
+    end
+
+    def run_after_reindex_callback(records, after_reindex_params)
+      after_reindex_params ||= {}
+
+      records.each do |record|
+        record.after_reindex(after_reindex_params[record.id.to_s]) if record.respond_to?(:after_reindex)
       end
     end
   end

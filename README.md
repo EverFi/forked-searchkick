@@ -2,6 +2,219 @@
 
 :rocket: Intelligent search made easy
 
+---
+
+## ! Custom Foundry features presenting in this fork only !
+
+### Nested queries
+
+Everfi engineering forked this repo and added advanced nested query support to avoid using the ES DSL. We now support multiple nested queries via `and/or`. In both cases we will wrap an `and/or` operation around all nested queries. Further more, in both scenarios the nested where clauses utilize the `and` boolean operation.
+
+Example 1: Multiple nested queries via `and`
+```ruby
+User.search(where: {
+  _and: [
+    {
+      "nested" => {
+        "path"=>"some path",
+        "where"=>{}
+      }
+    },
+    {
+     "nested" => {
+        "path"=>"some path",
+        "where"=>{}
+      }
+    }
+  ]
+})
+```
+
+Example 2: Multiple nested queries via `or`
+```ruby
+User.search(where: {
+  _or: [
+    {
+      "nested" => {
+        "path"=>"some path",
+        "where"=>{}
+      }
+    },
+    {
+     "nested" => {
+        "path"=>"some path",
+        "where"=>{}
+      }
+    }
+  ]
+})
+```
+
+Example 3: Single nested query
+```ruby
+User.search(where: {
+  "nested"=>{
+    "path"=>"some path",
+    "where"=>{}
+  }
+})
+```
+
+Example 3: Single nested query with inner nested queries
+```ruby
+User.search(where: {
+  "nested"=>{
+    "path"=>"some path",
+    "where"=>{
+      "nested"=>{
+        "path"=>"some path",
+        "where"=>{}
+      }
+    }
+  }
+})
+```
+
+### Dynamic callbacks mode
+It's possible to specify callbacks mode by lambda, in order to apply very special conditions like
+
+```ruby
+class User < ActeveRecord::Base
+  searchkick callbacks: ->{ searchkick_callbacks_mode }
+
+  private
+
+  def searchkick_callbacks_mode
+    if saved_changes.keys == [:last_sign_in_at]
+      false
+    elsif saved_changes.key?(:additional_search_data)
+      :inline
+    else
+      :async
+    end
+  end
+end
+```
+
+### `after_reindex` callback
+It's possible to specify `after_reindex` method on model in order to evaluate some stuff right after reindexing.
+For instance it might be needed for Kafka messaging, to be sure that comsumer will surely see search_data changes.
+In addimional you might be needed to implement `after_reindex_params` method in order to pass the data from in_memory
+object (such as `saved_changes`) to `after_reindex` callback:
+
+```ruby
+class User < ActeveRecord::Base
+  def after_reindex_params
+    params = {}
+
+    if saved_changes.key?(:active)
+      params[:activation_status] = active ? :active : :inactive
+    end
+
+    params
+  end
+
+  def after_reindex(params)
+    return unless params
+
+    # Important since the Symbol-typed values will be casted to strings during ActiveJob serialization
+    params.symbolize_keys!
+
+    UserStatusChanged.publish(**params) if params.key?(:activation_status)
+  end
+end
+```
+
+### `Thread_safe` mode
+There is race condition during reindexing because of the chain of non-atomic operations:
+1. Fetch the record by ID from DB
+2. Build search_data for such record
+3. Send reindexing API request to ElasticSearch
+
+As a result it's possible to face out-of-sync index data:
+1. Process 1 adds Label 1 to User
+2. Process 1 reloads the User for reindexing, taking associated Label 1
+3. Process 2 adds Label 2 to User
+4. Process 2 reloads the User for reindexing, taking associated Label 1 and Label 2
+5. Process 2 sends Label 1 and Label 2 to ElasticSearch
+6. Process 1 sends only Label 1 to ElasticSearch
+
+In order to prevent it we introduce `thread_safe` reindexing mode:
+
+```ruby
+class User < ActeveRecord::Base
+  searchkick thread_safe: true
+end
+```
+
+which will do the following under the hood:
+1. Wrap all operations related to reindexing by Postgress pessimistic lock;
+2. When asked to reindex in_memory object we will not use its state for search_data building. Instead we will fetch the edge state from DB by ID, wrapping all reindexing operations by pesismistic lock just like we do in #1
+
+There are two ENV variables related to `thread_safe` mode:
+* `SEARCHKICK_THREAD_SAFE_LOCK_TIMEOUT_SECONDS` will change the timeout used by advisory locking, 1 second by default;
+* `SEARCHKICK_THREAD_SAFE_DISABLED` should be set to `true` in order to turn off `thread_safe` mode globally in emergency case.
+
+** IMPORTANT **
+
+Starting from `4.0.0-everfi.1` gem version you need to add the migration for `Searchkick::IndexVersion` model in order to make it working:
+
+```
+bundle exec rails generate searchkick:migration
+```
+
+### Global refresh mode
+
+In additional to generic `Searchkick.callbacks(:inline) do; end` now it's possible to set refresh mode for the nested block:
+
+```ruby
+Searchkick.refresh(true) do # accepts `true`, 'false' or `:wait_for`
+  # Foobar
+end
+```
+
+## Upgrade to v5
+
+1. `Searchkick.unified_mappings` method has been removed, define the Searchkick mappkings accordingly to your ElasticSearch version:
+
+```ruby
+class User
+  searchkick mappings: { user: { properties: { ... } } } # ElasticSearch v6
+  searchkick mappings: { properties: { ... } } # ElasticSearch v7
+end
+```
+
+2. `Model.reindex(true_refresh: foo)` has been removed in favor of
+
+```ruby
+Searchkick.refresh(foo) do
+  Model.reindex
+end
+```
+
+## How to upgrade to upstream edge version
+
+It was decided that merging the upstream Searchkick sources into our fork is wrong approach,
+which leads to increasing volume of errors and overall garbage across the soources.
+The things become to be dramatically complex when upstream repo gets a hude refactoring like it happened with v5.
+The only reasonable way to keep our fork being at the top of upstream sources is:
+
+1. we have to group our commits per feature and squash them accordingly, which is already done and looks like following:
+
+* 5a6eafd - ! EVERFI CUSTOM STUFF ENDS HERE !
+* 3c9e44e - FC-894 Global refresh mode
+* aa277db - ECA-7969 FC-923 ECA-8600 ECA-8731  thread_safe mode
+* e4ee28a - ECA-7969 Support after_reindex callback
+* f508d87 - ECA-7969 Support the block as callbacks mode
+* d9cd91e - ECA-5119 indexed_at within search data
+* 8839734 - ECA-2245 ASMT-547 CS-3329 Nested queries
+* 0b76c47 - ! EVERFI CUSTOM STUFF STARTS HERE !
+
+2. Each time when we want to upgdare to the edge upstream version we have to `git rebase` these commits at the top of remote upstream sources.
+(as an option lets cherry-pick them one by one). This way we will keep the sources in clean and no-bugs state.
+
+---
+
 **Searchkick learns what your users are looking for.** As more people search, it gets smarter and the results get better. It’s friendly for developers - and magical for your users.
 
 Searchkick handles:
