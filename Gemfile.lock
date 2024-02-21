@@ -125,7 +125,7 @@ GEM
     sqlite3 (1.5.0-x86_64-linux)
     typhoeus (1.4.0)
       ethon (>= 0.9.0)
-    tzinfo (2.0.5)
+    tzinfo (2.0.6)
       concurrent-ruby (~> 1.0)
 
 PLATFORMS
