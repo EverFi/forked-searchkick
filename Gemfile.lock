@@ -8,36 +8,48 @@ PATH
 GEM
   remote: https://rubygems.org/
   specs:
-    actionpack (7.0.8.1)
-      actionview (= 7.0.8.1)
-      activesupport (= 7.0.8.1)
-      rack (~> 2.0, >= 2.2.4)
+    actionpack (7.1.3.2)
+      actionview (= 7.1.3.2)
+      activesupport (= 7.1.3.2)
+      nokogiri (>= 1.8.5)
+      racc
+      rack (>= 2.2.4)
+      rack-session (>= 1.0.1)
       rack-test (>= 0.6.3)
-      rails-dom-testing (~> 2.0)
-      rails-html-sanitizer (~> 1.0, >= 1.2.0)
-    actionview (7.0.8.1)
-      activesupport (= 7.0.8.1)
+      rails-dom-testing (~> 2.2)
+      rails-html-sanitizer (~> 1.6)
+    actionview (7.1.3.2)
+      activesupport (= 7.1.3.2)
       builder (~> 3.1)
-      erubi (~> 1.4)
-      rails-dom-testing (~> 2.0)
-      rails-html-sanitizer (~> 1.1, >= 1.2.0)
-    activejob (7.0.8.1)
-      activesupport (= 7.0.8.1)
+      erubi (~> 1.11)
+      rails-dom-testing (~> 2.2)
+      rails-html-sanitizer (~> 1.6)
+    activejob (7.1.3.2)
+      activesupport (= 7.1.3.2)
       globalid (>= 0.3.6)
-    activemodel (7.0.8.1)
-      activesupport (= 7.0.8.1)
-    activerecord (7.0.8.1)
-      activemodel (= 7.0.8.1)
-      activesupport (= 7.0.8.1)
-    activesupport (7.0.8.1)
+    activemodel (7.1.3.2)
+      activesupport (= 7.1.3.2)
+    activerecord (7.1.3.2)
+      activemodel (= 7.1.3.2)
+      activesupport (= 7.1.3.2)
+      timeout (>= 0.4.0)
+    activesupport (7.1.3.2)
+      base64
+      bigdecimal
       concurrent-ruby (~> 1.0, >= 1.0.2)
+      connection_pool (>= 2.2.5)
+      drb
       i18n (>= 1.6, < 2)
       minitest (>= 5.1)
+      mutex_m
       tzinfo (~> 2.0)
+    base64 (0.2.0)
+    bigdecimal (3.1.7)
     builder (3.2.4)
     concurrent-ruby (1.2.3)
     connection_pool (2.4.1)
     crass (1.0.6)
+    drb (2.2.1)
     elasticsearch (7.17.10)
       elasticsearch-api (= 7.17.10)
       elasticsearch-transport (= 7.17.10)
@@ -51,8 +63,16 @@ GEM
       ffi (>= 1.15.0)
     faraday (2.9.0)
       faraday-net_http (>= 2.0, < 3.2)
+    faraday-httpclient (2.0.1)
+      httpclient (>= 2.2)
     faraday-net_http (3.1.0)
       net-http
+    faraday-net_http_persistent (2.1.0)
+      faraday (~> 2.5)
+      net-http-persistent (~> 4.0)
+    faraday-typhoeus (1.1.0)
+      faraday (~> 2.0)
+      typhoeus (~> 1.4)
     ffi (1.16.3)
     gemoji (4.1.0)
     gemoji-parser (1.3.1)
@@ -60,6 +80,7 @@ GEM
     globalid (1.2.1)
       activesupport (>= 6.1)
     hashie (5.0.0)
+    httpclient (2.8.3)
     i18n (1.14.4)
       concurrent-ruby (~> 1.0)
     kaminari (1.2.2)
@@ -77,11 +98,13 @@ GEM
     loofah (2.22.0)
       crass (~> 1.0.2)
       nokogiri (>= 1.12.0)
-    mini_portile2 (2.8.6)
     minitest (5.22.3)
     multi_json (1.15.0)
+    mutex_m (0.2.0)
     net-http (0.4.1)
       uri
+    net-http-persistent (4.0.2)
+      connection_pool (~> 2.2)
     nokogiri (1.16.4-arm64-darwin)
       racc (~> 1.4)
     nokogiri (1.16.4-x86_64-darwin)
@@ -92,7 +115,9 @@ GEM
     parallel_tests (4.7.1)
       parallel
     racc (1.7.3)
-    rack (2.2.9)
+    rack (3.0.10)
+    rack-session (2.0.0)
+      rack (>= 3.0.0)
     rack-test (2.1.0)
       rack (>= 1.3)
     rails-dom-testing (2.2.0)
@@ -104,8 +129,10 @@ GEM
       nokogiri (~> 1.14)
     rake (13.2.1)
     redis (4.8.1)
-    sqlite3 (2.0.1)
-      mini_portile2 (~> 2.8.0)
+    sqlite3 (1.7.3-arm64-darwin)
+    sqlite3 (1.7.3-x86_64-darwin)
+    sqlite3 (1.7.3-x86_64-linux)
+    timeout (0.4.1)
     typhoeus (1.4.1)
       ethon (>= 0.9.0)
     tzinfo (2.0.6)
@@ -118,11 +145,15 @@ PLATFORMS
   x86_64-linux
 
 DEPENDENCIES
-  actionpack (~> 7.0.5)
-  activejob (~> 7.0.5)
-  activerecord (~> 7.0.5)
+  actionpack (~> 7.1.0)
+  activejob (~> 7.1.0)
+  activerecord (~> 7.1.0)
   connection_pool
   elasticsearch (~> 7)
+  faraday-httpclient
+  faraday-net_http
+  faraday-net_http_persistent
+  faraday-typhoeus
   gemoji-parser
   kaminari
   minitest (>= 5)
@@ -130,7 +161,7 @@ DEPENDENCIES
   rake
   redis (~> 4)
   searchkick!
-  sqlite3
+  sqlite3 (~> 1.4)
   typhoeus
 
 BUNDLED WITH
