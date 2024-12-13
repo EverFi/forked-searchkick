@@ -1,0 +1,27 @@
+# This workflow is to automate Checkmarx SAST scans.  It runs on a push to release or hotfix branches
+# For full documentation, including a list of all inputs, please refer to the README https://github.com/Checkmarx/ast-github-action
+
+name: Checkmarx One scan
+on:
+  push:
+    branches:
+      - 'release/[0-9][0-9][0-9][0-9].[0-9][0-9]'
+      - 'hotfix/[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+      - test-whitesource
+      - test-cx-scan
+jobs:
+  Checkmarx_One:
+    name: Checkmarx One
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Checkmarx AST Github Action
+        uses: Checkmarx/ast-github-action@2.0.23
+        with:
+          base_uri: ${{ vars.CHECKMARX_ONE_BASE_URI}}
+          cx_tenant: ${{ vars.CHECKMARX_ONE_TENANT }}
+          cx_client_id: ${{ vars.CHECKMARX_ONE_CLIENT_ID}}
+          cx_client_secret: ${{ secrets.CHECKMARX_ONE_CLIENT_SECRET }}
+          project_name: ${{ github.event.repository.name }}
+          additional_params: --sast-preset-name "BlackbaudSAST" --project-groups "Everfi"
