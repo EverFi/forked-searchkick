@@ -1,4 +1,4 @@
-# Searchkick
+# Searchkick [ ACRHIVED AND NO LONGER USED ]
 
 :rocket: Intelligent search made easy
 
